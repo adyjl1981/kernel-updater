@@ -7,18 +7,17 @@
 # and builds it with a performance-tuned toolchain (CPU-specific flags,
 # optional LTO, optional Clang/LLD, ccache).
 #
-# Tested target distros: Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman)
+# Dependency targets: Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman)
 #
 # USAGE:
 #   chmod +x build-custom-kernel.sh
 #   ./build-custom-kernel.sh              # GCC build, -march=native, ccache
-#   ./build-custom-kernel.sh --clang      # Clang+LLD build with LTO (thin)
+#   ./build-custom-kernel.sh --clang --lto  # Clang+LLD with ThinLTO
 #   ./build-custom-kernel.sh --jobs 8     # override parallel job count
 #
 # IMPORTANT SAFETY NOTES:
-#   - This will NOT overwrite your existing kernel. `make install` adds a new
-#     entry; GRUB keeps the old one as a fallback (in case the new kernel
-#     doesn't boot).
+#   - The installer refuses an existing release to avoid overwriting it.
+#     Verify your boot menu and a working fallback before rebooting.
 #   - Building takes a long time (30 min - a few hours depending on CPU) and
 #     a lot of disk space (15-25 GB free recommended).
 #   - Secure Boot: an unsigned custom kernel will likely fail to boot with
@@ -45,8 +44,8 @@ while [[ $# -gt 0 ]]; do
     --lto) USE_LTO=true; shift ;;
     --force) FORCE=true; shift ;;
     --full-debug-info) FULL_DEBUG_INFO=true; shift ;;
-    --jobs) JOBS="$2"; shift 2 ;;
-    --localversion) LOCALVERSION="$2"; shift 2 ;;
+    --jobs) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || { echo "--jobs requires a positive integer" >&2; exit 1; }; JOBS="$2"; shift 2 ;;
+    --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: $0 [--clang] [--lto] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
       echo "  --lto              requires --clang. Not recommended on low-RAM/low-core machines."
@@ -72,11 +71,13 @@ err()  { echo -e "\n\033[1;31m[error]\033[0m $*"; exit 1; }
 # terminal.
 run_sudo() {
   if [[ -n "${SUDO_ASKPASS:-}" ]]; then
-    sudo -A "$@"
+    sudo -A --preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE "$@"
   else
-    sudo "$@"
+    sudo --preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE "$@"
   fi
 }
+
+[[ $HOME != *$'\n'* ]] || err "Home directories containing newlines are not supported."
 
 [[ $EUID -eq 0 ]] && err "Run this as a normal user (it will sudo when needed), not as root."
 
@@ -90,15 +91,15 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# Ask for the sudo password once up front, then keep the credential alive
-# in the background for the rest of the (potentially multi-hour) run, so a
-# timed-out sudo session never stops the script to re-prompt partway through
-# a build. The background refresher is killed automatically on exit.
-log "Requesting sudo access up front (used throughout the script)"
-run_sudo -v
-( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
-SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+# Serialize builds/installations, including operations started by the GUI.
+SRC_DIR="$HOME/kernel-build"
+mkdir -p "$SRC_DIR"
+if [[ ${KERNEL_MANAGER_LOCK_FD:-} =~ ^[0-9]+$ ]]; then
+  exec 9>&"$KERNEL_MANAGER_LOCK_FD"
+else
+  exec 9>"$SRC_DIR/.operation.lock"
+fi
+flock -n 9 || err "Another kernel operation is running."
 
 ### ---------- 1. Detect distro / package manager ----------------------------
 log "Detecting distro and package manager"
@@ -113,8 +114,8 @@ echo "Package manager: $PKG"
 ### ---------- 2. Detect hardware --------------------------------------------
 log "Detecting CPU / hardware"
 
-CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^ //')
-CPU_VENDOR=$(grep -m1 "vendor_id"  /proc/cpuinfo | cut -d: -f2 | sed 's/^ //')
+CPU_MODEL=$(awk -F: '/^(model name|Hardware|Processor)[[:space:]]*:/ {sub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo)
+CPU_VENDOR=$(awk -F: '/^vendor_id[[:space:]]*:/ {sub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo)
 NPROC=$(nproc)
 MEM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
 ARCH=$(uname -m)
@@ -134,17 +135,14 @@ fi
 
 if (( MEM_GB < 8 )); then
   warn "Less than 8GB RAM detected. Kernel builds are RAM-hungry with high -j values."
-  warn "Consider lowering --jobs if you hit OOM / swap thrashing (e.g. --jobs $((NPROC/2)))."
+  warn "Consider lowering --jobs if you hit OOM / swap thrashing (e.g. --jobs $((NPROC > 1 ? NPROC/2 : 1)))."
 fi
 
-# Detect microarchitecture for GCC/Clang -march tuning (best-effort, x86_64 only)
-MARCH="native"
-if [[ "$ARCH" == "x86_64" ]] && command -v gcc >/dev/null 2>&1; then
-  if gcc -march=native -E -v - </dev/null 2>&1 | grep -q "march=native"; then
-    MARCH="native"
-  fi
+# Native tuning is supported here on x86; keep portable defaults elsewhere.
+COMMON_FLAGS="-O2"
+if [[ "$ARCH" == "x86_64" ]]; then
+  COMMON_FLAGS+=" -march=native -mtune=native"
 fi
-echo "  Using -march=$MARCH -mtune=$MARCH (auto-detected for this CPU)"
 
 # Secure Boot check
 if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
@@ -160,30 +158,31 @@ case "$PKG" in
     run_sudo apt update
     run_sudo apt install -y \
       build-essential libncurses-dev bison flex libssl-dev libelf-dev \
-      bc dwarves git fakeroot rsync cpio kmod ccache \
-      libudev-dev pahole zstd libdw-dev gawk
+      bc dwarves git fakeroot rsync cpio kmod ccache curl \
+      libudev-dev pahole zstd libdw-dev gawk python3 gnupg xz-utils
     $USE_CLANG && run_sudo apt install -y clang lld llvm
     ;;
   dnf)
-    run_sudo dnf groupinstall -y "Development Tools"
     run_sudo dnf install -y \
-      ncurses-devel bison flex openssl-devel elfutils-libelf-devel \
-      bc dwarves git fakeroot rsync cpio kmod ccache \
-      zstd elfutils-devel gawk
+      gcc gcc-c++ make perl ncurses-devel bison flex openssl-devel elfutils-libelf-devel \
+      bc dwarves git fakeroot rsync cpio kmod ccache curl \
+      zstd elfutils-devel gawk python3 gnupg2 xz
     $USE_CLANG && run_sudo dnf install -y clang lld llvm
     ;;
   pacman)
-    run_sudo pacman -Sy --needed --noconfirm \
+    run_sudo pacman -S --needed --noconfirm \
       base-devel ncurses bison flex openssl libelf \
-      bc dwarves git fakeroot rsync cpio kmod ccache \
-      zstd elfutils gawk
+      bc dwarves git fakeroot rsync cpio kmod ccache curl \
+      zstd elfutils gawk python gnupg xz
     $USE_CLANG && run_sudo pacman -S --needed --noconfirm clang lld llvm
     ;;
 esac
 
+# From here onward there are no privileged package operations to interrupt.
+echo "KERNEL_MANAGER_CANCELLABLE=1"
+
 ### ---------- 4. Enable ccache -----------------------------------------------
 log "Configuring ccache"
-export PATH="/usr/lib/ccache:$PATH"
 ccache --max-size=10G >/dev/null 2>&1 || true
 ccache -z >/dev/null 2>&1 || true
 
@@ -192,45 +191,31 @@ log "Querying kernel.org for the latest stable release"
 
 CURL_OPTS=(--fail --silent --show-error --location --connect-timeout 10 --max-time 30 --retry 2)
 
-KVER=""
-
-# Primary method: parse releases.json (fast if it works)
+# Python's JSON parser is also used by the GUI; never parse JSON with grep.
 JSON=$(curl "${CURL_OPTS[@]}" https://www.kernel.org/releases.json || true)
-if [[ -n "$JSON" ]]; then
-  KVER=$(echo "$JSON" | grep -oP '"version":\s*"\K[^"]+(?=".*?"moniker":\s*"stable")' 2>/dev/null | head -n1 || true)
+KVER=$(printf '%s' "$JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_stable"]["version"])' 2>/dev/null || true)
+if [[ ! "$KVER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+  warn "Release lookup failed; trying stable Git tags"
+  KVER=$(timeout 45 git ls-remote --tags --refs https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git 2>/dev/null \
+    | awk -F'refs/tags/v' '{print $2}' | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V | tail -n1 || true)
 fi
-
-# Fallback: git ls-remote against the stable tree (no JSON parsing, very reliable)
-if [[ -z "$KVER" ]]; then
-  warn "releases.json parsing failed or timed out, falling back to git ls-remote"
-  KVER=$(git ls-remote --tags --refs https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git 2>/dev/null \
-    | awk -F'refs/tags/v' '{print $2}' \
-    | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-    | sort -V | tail -n1 || true)
-fi
-
-if [[ -z "$KVER" ]]; then
-  err "Could not determine latest stable kernel version. Check your internet connection:
-    curl -v --max-time 15 https://www.kernel.org/releases.json
-  If that also hangs/fails, your network may be blocking kernel.org or git.kernel.org."
-fi
+[[ "$KVER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || err "Could not determine the stable release. Check your internet connection."
 log "Latest stable kernel: $KVER"
 
-SRC_DIR="$HOME/kernel-build"
-mkdir -p "$SRC_DIR"
-LAST_VER_FILE="$SRC_DIR/.last_built_version${USE_CLANG:+-clang}"
-
-if [[ -f "$LAST_VER_FILE" ]]; then
-  LAST_VER=$(cat "$LAST_VER_FILE")
-  if [[ "$LAST_VER" == "$KVER" ]] && ! $FORCE; then
-    echo
-    echo "No update: $KVER is the same version you last built with this script"
-    echo "(recorded on $(date -r "$LAST_VER_FILE" 2>/dev/null || echo 'unknown date'))."
-    echo "Currently running kernel: $(uname -r)"
-    echo "Nothing to do. Re-run with --force if you want to rebuild it anyway"
-    echo "(e.g. to pick up a config or toolchain-flag change)."
-    exit 0
-  fi
+TOOLCHAIN=gcc
+$USE_CLANG && TOOLCHAIN=clang
+BUILD_ID="$KVER $TOOLCHAIN $USE_LTO $FULL_DEBUG_INFO $LOCALVERSION"
+TREE="$SRC_DIR/linux-$KVER"
+if ! $FORCE; then
+  for candidate in "$SRC_DIR"/linux-"$KVER"*; do
+    if [[ -f "$candidate/.kernel-manager-complete" && -s "$candidate/vmlinux" && -s "$candidate/.kernel-manager-make-args" ]]; then
+      if [[ $(cat "$candidate/.kernel-manager-complete") == "$BUILD_ID" ]] && (cd "$candidate" && sha256sum --status -c .kernel-manager-checksums); then
+        log "This build is already complete."
+        printf 'KERNEL_MANAGER_BUILD_DIR=%s\n' "$candidate"
+        exit 0
+      fi
+    fi
+  done
 fi
 
 MAJOR=$(echo "$KVER" | cut -d. -f1)
@@ -241,15 +226,34 @@ URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
 
 if [[ ! -f "$TARBALL" ]]; then
   log "Downloading $URL"
-  curl --fail --location --connect-timeout 10 --max-time 1800 --retry 3 -o "$TARBALL" "$URL"
-else
-  log "$TARBALL already downloaded, skipping"
+  curl --fail --location --connect-timeout 10 --max-time 1800 --retry 3 -o "$TARBALL.part" "$URL"
+  mv -- "$TARBALL.part" "$TARBALL"
 fi
 
-log "Extracting source"
-rm -rf "linux-${KVER}"
-tar xf "$TARBALL"
-cd "linux-${KVER}"
+# Verify the uncompressed tar against kernel.org's release-signing key.
+# Fingerprint published at https://www.kernel.org/signature.html.
+SIGNER=647F28654894E3BD457199BE38DBBDC86092693E
+GPG_DIR="$SRC_DIR/.gnupg"
+mkdir -p "$GPG_DIR"
+chmod 700 "$GPG_DIR"
+if ! gpg --homedir "$GPG_DIR" --batch --list-keys "$SIGNER" >/dev/null 2>&1; then
+  timeout 60 gpg --homedir "$GPG_DIR" --batch --keyserver hkps://keys.openpgp.org --recv-keys "$SIGNER"
+fi
+curl "${CURL_OPTS[@]}" -o "$TARBALL.sign.part" "${URL%.xz}.sign"
+mv -- "$TARBALL.sign.part" "$TARBALL.sign"
+STATUS=$(xz -cd -- "$TARBALL" | gpg --homedir "$GPG_DIR" --batch --status-fd=1 --verify "$TARBALL.sign" -) || err "Source signature verification failed; cached archive: $SRC_DIR/$TARBALL"
+printf '%s\n' "$STATUS" | awk -v key="$SIGNER" '$2 == "VALIDSIG" && ($3 == key || $NF == key) {ok=1} END {exit !ok}' || err "Unexpected release signer."
+
+# Leave existing trees in place: installed modules may link to their headers.
+if [[ -e "$TREE" || -L "$TREE" ]]; then
+  TREE=$(mktemp -d "$SRC_DIR/linux-$KVER.rebuild.XXXXXX")
+  log "Existing source tree kept in place; using $TREE"
+else
+  mkdir "$TREE"
+fi
+log "Extracting verified source"
+tar --no-same-owner --strip-components=1 -xf "$TARBALL" -C "$TREE"
+cd "$TREE"
 
 # Drop the companion install script into the source dir so it's already
 # in the right place (next to the Makefile) once the build finishes.
@@ -260,6 +264,14 @@ else
   warn "install-custom-kernel.sh not found next to this script — skipping copy."
 fi
 
+# Keep every make invocation on the same compiler, flags, and release.
+MAKE_ARGS=( LOCALVERSION="$LOCALVERSION" KCFLAGS="$COMMON_FLAGS" )
+if $USE_CLANG; then
+  MAKE_ARGS+=( LLVM=1 LLVM_IAS=1 CC="ccache clang" )
+else
+  MAKE_ARGS+=( CC="ccache gcc" )
+fi
+
 ### ---------- 6. Configure the kernel ----------------------------------------
 log "Generating base config from your currently running kernel"
 
@@ -267,27 +279,14 @@ if [[ -f "/boot/config-$(uname -r)" ]]; then
   cp "/boot/config-$(uname -r)" .config
 else
   warn "No existing /boot/config-$(uname -r) found; using defconfig instead."
-  make defconfig
+  make "${MAKE_ARGS[@]}" defconfig
 fi
 
 # Update config for the new kernel version, keeping your existing choices
-make olddefconfig
+make "${MAKE_ARGS[@]}" olddefconfig
 
-# Trim to only the modules you actually use right now -> much faster builds.
-# (Comment this line out if you want a fully generic kernel instead.)
-# NOTE: `yes` gets killed by SIGPIPE once `make` stops reading, which under
-# `set -o pipefail` makes the pipeline look like it failed even though the
-# config step succeeded. The `|| true` guards against that false failure.
-yes "" | make localmodconfig || true
-
-# localmodconfig only keeps modules that are currently loaded, which means
-# it silently drops USB mass-storage support if no USB drive happened to be
-# plugged in while this script ran. Force these back on regardless, since
-# losing USB drive support is the kind of thing you only notice much later.
-scripts/config --module CONFIG_USB_STORAGE 2>/dev/null || true
-scripts/config --module CONFIG_USB_UAS 2>/dev/null || true
-scripts/config --enable CONFIG_SCSI 2>/dev/null || true
-scripts/config --enable CONFIG_BLK_DEV_SD 2>/dev/null || true
+# Keep the running kernel's module coverage; loaded modules alone do not
+# describe all hardware or filesystems needed at the next boot.
 
 # Ubuntu/Debian kernels point CONFIG_SYSTEM_TRUSTED_KEYS and
 # CONFIG_SYSTEM_REVOCATION_KEYS at debian/canonical-*.pem files that only
@@ -295,8 +294,8 @@ scripts/config --enable CONFIG_BLK_DEV_SD 2>/dev/null || true
 # kernel.org tarball. Left as-is, the certs build step fails looking for a
 # file that was never downloaded. Clear them so the kernel generates and
 # uses its own build-time keys instead.
-scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" 2>/dev/null || true
-scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS "" 2>/dev/null || true
+scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
 
 if $FULL_DEBUG_INFO; then
   log "Keeping full debug info (--full-debug-info was passed)"
@@ -306,55 +305,44 @@ else
   # whole symbol table / debug info in memory at once. On low-RAM machines
   # this is a common cause of the linker getting OOM-killed (Error 137).
   # Stripping debug info significantly cuts that peak memory usage.
-  scripts/config --disable CONFIG_DEBUG_INFO 2>/dev/null || true
-  scripts/config --set-val CONFIG_DEBUG_INFO_NONE y 2>/dev/null || true
-  scripts/config --disable CONFIG_DEBUG_INFO_DWARF4 2>/dev/null || true
-  scripts/config --disable CONFIG_DEBUG_INFO_DWARF5 2>/dev/null || true
-  scripts/config --disable CONFIG_DEBUG_INFO_BTF 2>/dev/null || true
-  scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES 2>/dev/null || true
+  scripts/config --disable CONFIG_DEBUG_INFO
+  scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
+  scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
+  scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+  scripts/config --disable CONFIG_DEBUG_INFO_BTF
+  scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
 fi
 
-make olddefconfig
+make "${MAKE_ARGS[@]}" olddefconfig
 
-### ---------- 7. Set up optimized toolchain flags ----------------------------
-log "Setting optimization flags"
-
-COMMON_FLAGS="-march=${MARCH} -mtune=${MARCH} -O2"
-MAKE_ARGS=( -j"${JOBS}" LOCALVERSION="${LOCALVERSION}" )
-
-if $USE_CLANG; then
-  log "Using Clang + LLD build"
-  MAKE_ARGS+=( LLVM=1 LLVM_IAS=1 )
-  if $USE_LTO; then
-    log "Enabling ThinLTO (--lto was passed)"
-    scripts/config --enable CONFIG_LTO_CLANG_THIN 2>/dev/null || true
-    scripts/config --disable CONFIG_LTO_NONE 2>/dev/null || true
-    make olddefconfig
-  fi
-else
-  log "Using GCC with ccache and CPU-specific flags"
-  export KCFLAGS="${COMMON_FLAGS}"
-  export CC="ccache gcc"
+if $USE_LTO; then
+  scripts/config --enable CONFIG_LTO_CLANG_THIN
+  scripts/config --disable CONFIG_LTO_NONE
+  make "${MAKE_ARGS[@]}" olddefconfig
+  grep -qx 'CONFIG_LTO_CLANG_THIN=y' .config || err "ThinLTO is not supported by this configuration/toolchain."
 fi
+
+# Invalidate completion before compiling and save arguments as data, not shell.
+printf '%s\0' "${MAKE_ARGS[@]}" > .kernel-manager-make-args
 
 ### ---------- 8. Build --------------------------------------------------------
 log "Building kernel ${KVER}${LOCALVERSION} with ${JOBS} parallel jobs (this will take a while)"
 
 BUILD_LOG="$SRC_DIR/build-${KVER}${LOCALVERSION}.log"
 
-time make "${MAKE_ARGS[@]}" 2>&1 | tee "$BUILD_LOG"
-
-log "Building kernel modules"
-time make "${MAKE_ARGS[@]}" modules 2>&1 | tee -a "$BUILD_LOG"
+time make -j"$JOBS" "${MAKE_ARGS[@]}" 2>&1 | tee "$BUILD_LOG"
 
 ### ---------- 9. Ready to install --------------------------------------------
+RELEASE=$(make -s "${MAKE_ARGS[@]}" kernelrelease)
+[[ "$RELEASE" == "$(cat include/config/kernel.release)" ]] || err "Kernel release changed after the build."
+IMAGE=$(make -s "${MAKE_ARGS[@]}" image_name)
+[[ -s "$IMAGE" && -s vmlinux && -s System.map ]] || err "Build artifacts are incomplete."
+sha256sum .config .kernel-manager-make-args include/config/kernel.release vmlinux System.map "$IMAGE" > .kernel-manager-checksums
+printf '%s\n' "$BUILD_ID" > .kernel-manager-complete
 log "Build complete!"
+printf 'KERNEL_MANAGER_BUILD_DIR=%s\n' "$TREE"
 echo "Kernel ${KVER}${LOCALVERSION} is built. Install it by running:"
-echo "    cd $(pwd)"
+printf "    cd %q\n" "$PWD"
 echo "    ./install-custom-kernel.sh"
 echo
 ccache -s 2>/dev/null || true
-
-# Record this version so future runs can tell you when there's nothing new
-# to build (see --force to override).
-echo "$KVER" > "$LAST_VER_FILE"

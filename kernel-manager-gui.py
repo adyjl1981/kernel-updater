@@ -10,7 +10,7 @@ install-custom-kernel.sh scripts.
 Features:
   1. Shows currently installed kernels and which one is running.
   2. Lets you delete surplus kernels (apt-managed or custom-built).
-  3. Checks kernel.org for a newer stable version than what's installed.
+  3. Checks kernel.org for a newer stable version than what's running.
   4. Lets you pick a toolchain (GCC / Clang, +LTO, +full debug info) and
      kick off a build.
   5. Streams the build's live output into the window.
@@ -20,15 +20,21 @@ Expects build-custom-kernel.sh, install-custom-kernel.sh, and
 askpass-gui.py to live in the same directory as this script.
 """
 
+import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
+import stat
+import tempfile
 import subprocess
 import sys
 import threading
 import time
 import queue
+import urllib.request
 import tkinter as tk
 from tkinter import ttk, messagebox
 from pathlib import Path
@@ -38,8 +44,10 @@ BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
 INSTALL_SCRIPT = SCRIPT_DIR / "install-custom-kernel.sh"
 ASKPASS_SCRIPT = SCRIPT_DIR / "askpass-gui.py"
 KERNEL_BUILD_DIR = Path.home() / "kernel-build"
-MOK_DIR = SCRIPT_DIR / "mok"
-CONFIG_DIR = Path.home() / ".config" / "kernel-manager-gui"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "kernel-manager-gui"
+# Continue using existing keys; generate new ones in private user storage.
+LEGACY_MOK_DIR = SCRIPT_DIR / "mok"
+MOK_DIR = LEGACY_MOK_DIR if any(LEGACY_MOK_DIR.glob("MOK.*")) else CONFIG_DIR / "mok"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 VER_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
@@ -53,6 +61,8 @@ def gui_env() -> dict:
     """Environment for subprocesses launched by this GUI: points sudo at
     our askpass helper so password prompts show up as a dialog instead of
     failing (there's no terminal attached to a GUI-launched process)."""
+    if not ASKPASS_SCRIPT.is_file() or not os.access(ASKPASS_SCRIPT, os.R_OK | os.X_OK):
+        raise RuntimeError(f"Missing or inaccessible password helper: {ASKPASS_SCRIPT}")
     env = os.environ.copy()
     env["SUDO_ASKPASS"] = str(ASKPASS_SCRIPT)
     env["DEBIAN_FRONTEND"] = "noninteractive"
@@ -72,7 +82,8 @@ def send_notification(title: str, body: str):
 
 def load_presets() -> dict:
     try:
-        return json.loads(CONFIG_FILE.read_text())
+        data = json.loads(CONFIG_FILE.read_text())
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -80,14 +91,16 @@ def load_presets() -> dict:
 def save_presets(d: dict):
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(d, indent=2))
-    except Exception:
-        pass  # presets are a convenience, not worth failing over
+        with tempfile.NamedTemporaryFile("w", dir=CONFIG_DIR, delete=False) as f:
+            json.dump(d, f, indent=2)
+        os.replace(f.name, CONFIG_FILE)
+    except OSError as e:
+        print(f"Could not save preferences: {e}", file=sys.stderr)
 
 
 def find_terminal_emulator():
-    for candidate in ("x-terminal-emulator", "gnome-terminal", "konsole",
-                       "xfce4-terminal", "xterm"):
+    for candidate in ("gnome-terminal", "konsole", "xfce4-terminal",
+                       "xterm", "x-terminal-emulator"):
         path = shutil.which(candidate)
         if path:
             return path
@@ -137,49 +150,110 @@ def read_cpu_times():
         parts = f.readline().split()
     values = [int(x) for x in parts[1:]]
     idle = values[3] + (values[4] if len(values) > 4 else 0)
-    total = sum(values)
+    total = sum(values[:8])  # guest times are already included in user/nice
     return idle, total
 
 
-def grub_menu_titles(env: dict = None):
-    """Best-effort extraction of top-level menuentry titles from grub.cfg,
-    purely informational (helps verify the naming convention this app
-    assumes when setting a default/one-time boot kernel).
+def run_command(cmd, env=None, log_fn=lambda text: None):
+    cmd = [str(arg) for arg in cmd]
+    if cmd[0] == "sudo":
+        cmd.insert(1, "--preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE")
+    log_fn(f"$ {shlex.join(cmd)}\n")
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    log_fn(proc.stdout + proc.stderr)
+    if proc.returncode:
+        raise RuntimeError(f"Command failed ({proc.returncode}): {shlex.join(cmd)}")
+    return proc
 
-    Returns (titles, error). grub.cfg is sometimes locked to root-only
-    read access, so this falls back to reading it via sudo (through the
-    same askpass mechanism used elsewhere in the app) if a plain read
-    fails."""
-    for cfg in ("/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"):
-        p = Path(cfg)
-        if not p.exists():
+
+def read_grub_config(env=None):
+    for name in ("/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"):
+        path = Path(name)
+        if not path.exists():
             continue
-
-        text = None
         try:
-            text = p.read_text(errors="ignore")
+            return path.read_text()
         except PermissionError:
-            try:
-                proc = subprocess.run(
-                    ["sudo", "-A", "cat", cfg],
-                    env=env or gui_env(), capture_output=True, text=True, timeout=15
-                )
-                if proc.returncode == 0:
-                    text = proc.stdout
-                else:
-                    return [], f"Permission denied reading {cfg}, and sudo cat also failed:\n{proc.stderr}"
-            except Exception as e:
-                return [], f"Permission denied reading {cfg}, and the sudo fallback failed: {e}"
-        except Exception as e:
-            return [], f"Error reading {cfg}: {e}"
+            return run_command(["sudo", "-A", "cat", name], env or gui_env()).stdout
+    raise RuntimeError("No supported GRUB configuration was found.")
 
-        if text is not None:
-            titles = re.findall(r"menuentry\s+['\"]([^'\"]+)['\"]", text)
-            if not titles:
-                return [], f"{cfg} was read successfully but no menuentry lines matched — its format may differ from what this app expects."
-            return titles, None
 
-    return [], "Couldn't find grub.cfg at /boot/grub/grub.cfg or /boot/grub2/grub.cfg."
+def parse_grub_entries(text):
+    """Read title paths from generated GRUB menu/submenu blocks."""
+    entries, stack = [], []
+    for line in text.splitlines():
+        line = line.strip()
+        if line == "}":
+            if stack:
+                stack.pop()
+            continue
+        if not re.match(r"^(menuentry|submenu)\s", line):
+            continue
+        words = shlex.split(line, comments=True)
+        if len(words) < 3 or words[-1] != "{":
+            raise RuntimeError("Unsupported GRUB entry format; select the boot entry manually.")
+        kind, title = words[:2]
+        if kind == "menuentry":
+            entries.append(">".join([name for typ, name in stack if typ == "submenu"] + [title]))
+        stack.append((kind, title))
+    if stack:
+        raise RuntimeError("Unbalanced GRUB menu blocks; select the boot entry manually.")
+    return entries
+
+
+def grub_menu_titles(env=None):
+    try:
+        titles = parse_grub_entries(read_grub_config(env))
+        return titles, None if titles else "No supported menu entries found (BLS entries require manual selection)."
+    except Exception as e:
+        return [], str(e)
+
+
+def grub_update_command():
+    for cfg, commands in (("/boot/grub/grub.cfg", ("update-grub", "grub-mkconfig")),
+                          ("/boot/grub2/grub.cfg", ("grub2-mkconfig",))):
+        if Path(cfg).is_file():
+            for command in commands:
+                if shutil.which(command):
+                    return [command] if command == "update-grub" else [command, "-o", cfg]
+    raise RuntimeError("No supported GRUB update command/configuration. Manage this kernel manually.")
+
+
+def validate_release(version):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+[a-zA-Z0-9._+-]*", version):
+        raise RuntimeError("Invalid kernel release.")
+    return version
+
+
+def completed_build_dirs():
+    result = []
+    for marker in KERNEL_BUILD_DIR.glob("linux-*/.kernel-manager-complete"):
+        tree = marker.parent
+        try:
+            if tree.is_symlink() or not marker.read_text().strip():
+                continue
+            release = validate_release((tree / "include/config/kernel.release").read_text().strip())
+            if Path(f"/lib/modules/{release}").exists() or Path(f"/boot/vmlinuz-{release}").exists():
+                continue
+            if not (tree / ".kernel-manager-make-args").is_file():
+                continue
+            checked = subprocess.run(["sha256sum", "--status", "-c", ".kernel-manager-checksums"], cwd=tree,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if checked.returncode == 0:
+                result.append((marker.stat().st_mtime, tree))
+        except (OSError, RuntimeError):
+            continue
+    return [tree for _, tree in sorted(result, reverse=True)]
+
+
+def find_source_tree(version):
+    for release in KERNEL_BUILD_DIR.glob("linux-*/include/config/kernel.release"):
+        try:
+            if release.read_text().strip() == version:
+                return release.parents[2]
+        except OSError:
+            continue
+    raise RuntimeError(f"No matching built source tree for {version}.")
 
 
 def kernel_build_source_dirs():
@@ -189,7 +263,7 @@ def kernel_build_source_dirs():
     if not KERNEL_BUILD_DIR.exists():
         return dirs
     for entry in sorted(KERNEL_BUILD_DIR.iterdir()):
-        if entry.is_dir() and entry.name.startswith("linux-"):
+        if entry.is_dir() and not entry.is_symlink() and entry.name.startswith("linux-"):
             try:
                 size_out = subprocess.check_output(["du", "-sh", str(entry)], text=True)
                 size = size_out.split()[0]
@@ -212,57 +286,62 @@ def build_log_files():
 # ---------------------------------------------------------------------------
 
 class KernelInfo:
-    def __init__(self, version, apt_managed, running, size_str):
+    def __init__(self, version, apt_managed, running, size_str, manager=None):
         self.version = version
         self.apt_managed = apt_managed
         self.running = running
         self.size_str = size_str
+        self.manager = manager or ("apt" if apt_managed else "custom")
+
+
+def package_manager_for_kernel(version):
+    """Unknown ownership must never authorize direct removal of files."""
+    paths = [f"/boot/vmlinuz-{version}", f"/lib/modules/{version}",
+             f"/usr/lib/modules/{version}", f"/usr/lib/modules/{version}/vmlinuz"]
+    found_manager = False
+    for tool, manager, args in (("dpkg-query", "apt", ["-S"]),
+                                ("rpm", "rpm", ["-qf"]),
+                                ("pacman", "pacman", ["-Qo"])):
+        if not shutil.which(tool):
+            continue
+        found_manager = True
+        for path in paths:
+            proc = subprocess.run([tool, *args, path], env=dict(os.environ, LC_ALL="C"), capture_output=True, text=True)
+            if proc.returncode == 0:
+                return manager
+            missing = {"apt": "no path found matching pattern", "rpm": "is not owned by any package", "pacman": "No package owns"}
+            if proc.returncode != 1 or missing[manager] not in proc.stdout + proc.stderr:
+                return "unknown"
+    return "custom" if found_manager else "unknown"
 
 
 def list_installed_kernels():
-    """Enumerate installed kernels from /lib/modules, cross-checked against
-    dpkg to tell apt-managed kernels apart from custom/manually-built ones."""
     kernels = []
     modules_root = Path("/lib/modules")
     if not modules_root.exists():
         return kernels
-
     current = running_kernel()
-
     for entry in sorted(modules_root.iterdir()):
-        if not entry.is_dir():
+        if not entry.is_dir() or not re.fullmatch(r"[0-9]+\.[0-9]+[a-zA-Z0-9._+-]*", entry.name):
             continue
-        version = entry.name
-
-        # Is this kernel owned by a dpkg package (apt-installed) or not
-        # (built by our script)?
-        apt_managed = False
+        manager = package_manager_for_kernel(entry.name)
         try:
-            result = subprocess.run(
-                ["dpkg", "-S", f"/boot/vmlinuz-{version}"],
-                capture_output=True, text=True
-            )
-            apt_managed = result.returncode == 0
-        except FileNotFoundError:
-            pass  # dpkg not present (non-Debian system) — treat as custom
-
-        # Rough size on disk for the modules directory
-        size_str = "?"
-        try:
-            out = subprocess.check_output(["du", "-sh", str(entry)], text=True)
-            size_str = out.split()[0]
-        except Exception:
-            pass
-
-        kernels.append(KernelInfo(version, apt_managed, version == current, size_str))
-
+            size = subprocess.check_output(["du", "-sh", str(entry)], text=True).split()[0]
+        except (OSError, subprocess.SubprocessError):
+            size = "?"
+        kernels.append(KernelInfo(entry.name, manager == "apt", entry.name == current, size, manager))
     return kernels
 
 
 def latest_stable_version() -> str | None:
-    """Same git-ls-remote approach used by build-custom-kernel.sh, kept
-    independent here so the GUI doesn't need to invoke the build script
-    just to check for updates."""
+    """Use kernel.org's structured release field, with a bounded Git fallback."""
+    try:
+        with urllib.request.urlopen("https://www.kernel.org/releases.json", timeout=15) as response:
+            version = json.load(response)["latest_stable"]["version"]
+        if VER_RE.fullmatch(version):
+            return version
+    except Exception:
+        pass
     try:
         out = subprocess.check_output(
             ["git", "ls-remote", "--tags", "--refs",
@@ -286,74 +365,78 @@ def latest_stable_version() -> str | None:
     return ".".join(str(x) for x in best)
 
 
+def installed_kernel_packages(version):
+    proc = run_command(["dpkg-query", "-W", "-f=${binary:Package}\t${db:Status-Status}\n"])
+    pattern = re.compile(r"linux-(?:image(?:-unsigned)?|headers|modules(?:-extra)?)-" + re.escape(version) + r"(?::[\w-]+)?")
+    return [name for line in proc.stdout.splitlines() if "\t" in line
+            for name, status in [line.split("\t", 1)]
+            if status == "installed" and pattern.fullmatch(name)]
+
+
 def delete_kernel(kernel: KernelInfo, env: dict, log_fn):
-    """Remove a kernel. apt-managed kernels are purged via apt (so dpkg's
-    database stays consistent); custom-built kernels are removed by hand,
-    then the bootloader is refreshed either way."""
-    if kernel.running:
-        raise RuntimeError("Refusing to delete the kernel that's currently running.")
-
-    def run(cmd):
-        log_fn(f"$ {' '.join(cmd)}\n")
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        if proc.stdout:
-            log_fn(proc.stdout)
-        if proc.stderr:
-            log_fn(proc.stderr)
-        if proc.returncode != 0:
-            raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)}")
-
-    if kernel.apt_managed:
-        pkgs = [
-            f"linux-image-{kernel.version}",
-            f"linux-headers-{kernel.version}",
-            f"linux-modules-{kernel.version}",
-            f"linux-modules-extra-{kernel.version}",
-        ]
-        run(["sudo", "-A", "apt", "purge", "-y", *pkgs])
-        run(["sudo", "-A", "apt", "autoremove", "-y"])
+    version = validate_release(kernel.version)
+    current = running_kernel()
+    if kernel.running or version == current:
+        raise RuntimeError("Refusing to delete the running kernel.")
+    manager = package_manager_for_kernel(version)
+    if manager not in ("apt", "custom"):
+        raise RuntimeError(f"Kernel ownership is {manager}; use the distribution's package manager.")
+    if not Path(f"/boot/vmlinuz-{current}").is_file():
+        raise RuntimeError("Could not verify the running kernel's boot image as a fallback.")
+    grub_cmd = grub_update_command()  # Preflight before removing anything.
+    if re.search(r"^\s*blscfg\b", read_grub_config(env), re.M):
+        raise RuntimeError("BLS kernel removal requires the distribution's tools.")
+    if manager == "apt":
+        pkgs = installed_kernel_packages(version)
+        if not pkgs or not any(p.startswith("linux-image-") for p in pkgs):
+            raise RuntimeError("Could not identify the installed kernel image package; nothing removed.")
+        simulation_env = dict(env, LC_ALL="C")
+        simulation = run_command(["apt-get", "-s", "purge", *pkgs], simulation_env, log_fn)
+        removals = set(re.findall(r"^(?:Remv|Purg) (\S+)", simulation.stdout, re.M))
+        allowed = {p.split(":")[0] for p in pkgs}
+        if not removals or any(p.split(":")[0] not in allowed for p in removals):
+            raise RuntimeError("APT would remove other packages; review the removal manually.")
+        run_command(["sudo", "-A", "apt-get", "purge", "-y", *pkgs], env, log_fn)
     else:
-        for path in [
-            f"/boot/vmlinuz-{kernel.version}",
-            f"/boot/System.map-{kernel.version}",
-            f"/boot/config-{kernel.version}",
-            f"/boot/initrd.img-{kernel.version}",
-        ]:
-            if Path(path).exists():
-                run(["sudo", "-A", "rm", "-f", path])
-        modules_dir = f"/lib/modules/{kernel.version}"
-        if Path(modules_dir).exists():
-            run(["sudo", "-A", "rm", "-rf", modules_dir])
-def grub_entry_title(version: str) -> str:
-    """Best-effort GRUB menu path for a given kernel version, following the
-    standard Ubuntu layout (top-level 'Ubuntu' + 'Advanced options for
-    Ubuntu' submenu generated by update-grub). This is a convention, not a
-    guarantee — use 'Show actual GRUB entries' in the GUI to confirm it
-    matches your system before relying on it."""
-    return f"Advanced options for Ubuntu>Ubuntu, with Linux {version}"
+        paths = [Path(f"/boot/{prefix}{version}{suffix}") for prefix, suffix in
+                 (("vmlinuz-", ""), ("System.map-", ""), ("config-", ""),
+                  ("initrd.img-", ""), ("initramfs-", ".img"))]
+        modules = Path(f"/lib/modules/{version}")
+        if modules.is_symlink() or any(p.is_symlink() for p in paths):
+            raise RuntimeError("Unexpected symlink in this kernel's installation; remove it manually.")
+        for path in paths:
+            if path.exists():
+                run_command(["sudo", "-A", "rm", "-f", "--", path], env, log_fn)
+        if modules.exists():
+            run_command(["sudo", "-A", "rm", "-rf", "--", modules], env, log_fn)
+    run_command(["sudo", "-A", *grub_cmd], env, log_fn)
+
+
+def grub_entry_title(version, env=None):
+    validate_release(version)
+    titles, error = grub_menu_titles(env)
+    if error:
+        raise RuntimeError(error)
+    pattern = re.compile(r"(?<![\w.+-])" + re.escape(version) + r"(?![\w.+-])")
+    matches = [title for title in titles if pattern.search(title) and "recovery" not in title.lower()]
+    if len(matches) != 1:
+        raise RuntimeError("Could not identify one unambiguous GRUB entry; select it manually.")
+    return matches[0]
 
 
 def set_default_boot(version: str, env: dict, log_fn, once: bool):
-    """Persistently (grub-set-default) or one-time (grub-reboot) select
-    which kernel GRUB should boot next."""
-    entry = grub_entry_title(version)
-    cmd = ["sudo", "-A", "grub-reboot" if once else "grub-set-default", entry]
-    log_fn(f"$ {' '.join(cmd)}\n")
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if proc.stdout:
-        log_fn(proc.stdout)
-    if proc.stderr:
-        log_fn(proc.stderr)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"grub-{'reboot' if once else 'set-default'} failed. This usually means "
-            f"the assumed menu entry name doesn't match your actual GRUB config — "
-            f"use 'Show actual GRUB entries' to check the real title."
-        )
-    if not once:
-        # grub-set-default only stages the change; update-grub commits it.
-        subprocess.run(["sudo", "-A", "update-grub"], env=env,
-                        capture_output=True, text=True)
+    entry = grub_entry_title(version, env)
+    config = read_grub_config(env)
+    if once:
+        if "next_entry" not in config or "save_env next_entry" not in config:
+            raise RuntimeError("This GRUB configuration does not support a one-time saved entry.")
+    elif not re.search(r'^\s*set default=[\"\']?\$\{saved_entry\}[\"\']?\s*$', config, re.M):
+        raise RuntimeError("Set GRUB_DEFAULT=saved and regenerate GRUB configuration before using this button.")
+    names = ("grub-reboot", "grub2-reboot") if once else ("grub-set-default", "grub2-set-default")
+    command = next((name for name in names if shutil.which(name)), None)
+    if not command:
+        raise RuntimeError("GRUB boot-selection command is not installed.")
+    run_command(["sudo", "-A", command, entry], env, log_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -365,42 +448,48 @@ def mok_key_exists() -> bool:
 
 
 def generate_mok_key(log_fn):
-    MOK_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "openssl", "req", "-new", "-x509", "-newkey", "rsa:2048",
-        "-keyout", str(MOK_DIR / "MOK.priv"),
-        "-outform", "DER", "-out", str(MOK_DIR / "MOK.der"),
-        "-nodes", "-days", "36500",
-        "-subj", "/CN=Kernel Manager GUI signing key/",
-    ]
-    log_fn(f"$ {' '.join(cmd)}\n")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    log_fn(proc.stdout + proc.stderr)
-    if proc.returncode != 0:
-        raise RuntimeError("Key generation failed — see log above.")
-    os.chmod(MOK_DIR / "MOK.priv", 0o600)
+    MOK_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Generate both files privately before replacing an existing pair.
+    with tempfile.TemporaryDirectory(dir=MOK_DIR) as tmp:
+        priv, der = Path(tmp) / "MOK.priv", Path(tmp) / "MOK.der"
+        run_command(["openssl", "req", "-new", "-x509", "-newkey", "rsa:2048",
+                     "-keyout", priv, "-outform", "DER", "-out", der,
+                     "-nodes", "-days", "36500", "-subj", "/CN=Kernel Manager GUI signing key/"], log_fn=log_fn)
+        priv.chmod(0o600)
+        # Retain a recoverable copy when replacing an enrolled key.
+        for name in ("MOK.priv", "MOK.der"):
+            existing = MOK_DIR / name
+            if existing.exists():
+                backup = existing.with_name(name + ".previous")
+                shutil.copy2(existing, backup)
+                if name.endswith("priv"):
+                    backup.chmod(0o600)
+        os.replace(priv, MOK_DIR / "MOK.priv")
+        os.replace(der, MOK_DIR / "MOK.der")
 
 
 def enroll_mok_key_in_terminal(log_fn):
-    """mokutil reads its password directly from the terminal (not via
-    sudo/SUDO_ASKPASS), and enrollment is only actually completed by a
-    firmware dialog on the next reboot — neither of those can be scripted,
-    so this opens a real terminal window for the interactive part."""
     term = find_terminal_emulator()
-    if not term:
-        raise RuntimeError("No terminal emulator found (tried gnome-terminal, "
-                            "konsole, xfce4-terminal, xterm).")
-    inner = (
-        f"sudo mokutil --import '{MOK_DIR / 'MOK.der'}'; "
-        f"echo; echo 'Press Enter to close this window, then reboot to "
-        f"finish enrollment in the blue MOK Manager screen.'; read"
-    )
-    if "gnome-terminal" in term:
-        cmd = [term, "--", "bash", "-c", inner]
+    if not term or not shutil.which("mokutil"):
+        raise RuntimeError("A terminal emulator and mokutil must be installed to enroll the key.")
+    inner = ('sudo mokutil --import "$1"; status=$?; '
+             'if [ "$status" -eq 0 ]; then echo "Reboot to finish MOK enrollment."; '
+             'else echo "Enrollment request failed."; fi; '
+             'read -r -p "Press Enter to close."; exit "$status"')
+    args = ["bash", "-c", inner, "kernel-manager-mok", str(MOK_DIR / "MOK.der")]
+    actual = Path(term).resolve().name
+    if "gnome-terminal" in actual:
+        cmd = [term, "--wait", "--", *args]
+    elif "xfce4-terminal" in actual:
+        cmd = [term, "--disable-server", "--command", shlex.join(args)]
+    elif "konsole" in actual:
+        cmd = [term, "--separate", "-e", *args]
     else:
-        cmd = [term, "-e", f"bash -c \"{inner}\""]
-    log_fn(f"Opening a terminal for interactive enrollment: {' '.join(cmd)}\n")
-    subprocess.Popen(cmd)
+        cmd = [term, "-e", *args]
+    log_fn(f"Opening enrollment terminal: {shlex.join(cmd)}\n")
+    proc = subprocess.run(cmd)
+    if proc.returncode:
+        raise RuntimeError("Enrollment terminal exited unsuccessfully; check the enrollment status.")
 
 
 def build_sign_file_tool(kernel_src_dir: Path, log_fn) -> Path:
@@ -411,46 +500,93 @@ def build_sign_file_tool(kernel_src_dir: Path, log_fn) -> Path:
     if sign_file.exists():
         return sign_file
     log_fn(f"Building scripts/sign-file in {kernel_src_dir}...\n")
-    proc = subprocess.run(["make", "scripts/sign-file"], cwd=str(kernel_src_dir),
+    saved = kernel_src_dir / ".kernel-manager-make-args"
+    args = [x for x in saved.read_text().split("\0") if x] if saved.exists() else []
+    proc = subprocess.run(["make", *args, "scripts/sign-file"], cwd=str(kernel_src_dir),
                            capture_output=True, text=True)
     log_fn(proc.stdout + proc.stderr)
-    if not sign_file.exists():
+    if proc.returncode or not sign_file.exists():
         raise RuntimeError("Couldn't build scripts/sign-file — see log above.")
     return sign_file
 
 
+def initramfs_command(version):
+    if shutil.which("update-initramfs"):
+        return ["update-initramfs", "-u", "-k", version]
+    if shutil.which("dracut"):
+        return ["dracut", "--force", f"/boot/initramfs-{version}.img", version]
+    raise RuntimeError("No supported initramfs generator; sign and regenerate it manually.")
+
+
+def replace_signed_file(source, destination, env, log_fn):
+    """Stage beside the destination so the final replacement is atomic."""
+    info = destination.stat()
+    staged = run_command(["sudo", "-A", "mktemp", str(destination) + ".signed.XXXXXX"], env).stdout.strip()
+    try:
+        run_command(["sudo", "-A", "install", "-m", format(stat.S_IMODE(info.st_mode), "o"),
+                     "-o", str(info.st_uid), "-g", str(info.st_gid), "--", source, staged], env, log_fn)
+        run_command(["sudo", "-A", "mv", "-f", "--", staged, destination], env, log_fn)
+    finally:
+        run_command(["sudo", "-A", "rm", "-f", "--", staged], env)
+
+
 def sign_kernel_and_modules(version: str, env: dict, log_fn):
+    validate_release(version)
     if not mok_key_exists():
         raise RuntimeError("No MOK signing key yet — generate one first.")
-
-    kernel_src_dir = KERNEL_BUILD_DIR / f"linux-{version.split('-')[0]}"
-    if not kernel_src_dir.exists():
-        raise RuntimeError(f"Can't find the source tree for {version} at "
-                            f"{kernel_src_dir} (needed for scripts/sign-file).")
-
-    sign_file = build_sign_file_tool(kernel_src_dir, log_fn)
+    if package_manager_for_kernel(version) != "custom":
+        raise RuntimeError("Only verified custom kernels can be signed here.")
+    for tool in ("sbsign", "sbverify", "openssl", "mokutil", "depmod"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"Required signing tool is not installed: {tool}")
+    initrd_cmd = initramfs_command(version)
     priv, der = MOK_DIR / "MOK.priv", MOK_DIR / "MOK.der"
-
-    def run(cmd):
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        if proc.stdout:
-            log_fn(proc.stdout)
-        if proc.stderr:
-            log_fn(proc.stderr)
-        if proc.returncode != 0:
-            raise RuntimeError(f"Signing failed: {' '.join(cmd)}")
-
+    run_command(["mokutil", "--test-key", der], env, log_fn)
+    kernel_src_dir = find_source_tree(version)
+    config = (kernel_src_dir / ".config").read_text()
+    if "CONFIG_MODULE_SIG=y" not in config:
+        raise RuntimeError("This kernel lacks module signature support. Rebuild with CONFIG_MODULE_SIG enabled.")
     vmlinuz = Path(f"/boot/vmlinuz-{version}")
-    if vmlinuz.exists():
-        log_fn(f"Signing {vmlinuz}\n")
-        run(["sudo", "-A", str(sign_file), "sha256", str(priv), str(der), str(vmlinuz)])
-
     modules_dir = Path(f"/lib/modules/{version}")
-    kos = list(modules_dir.rglob("*.ko")) if modules_dir.exists() else []
-    log_fn(f"Signing {len(kos)} modules in {modules_dir}...\n")
-    for ko in kos:
-        run(["sudo", "-A", str(sign_file), "sha256", str(priv), str(der), str(ko)])
-    log_fn("All done.\n")
+    if not vmlinuz.is_file() or not modules_dir.is_dir():
+        raise RuntimeError("Kernel image or modules directory is missing.")
+    modules = sorted(p for p in modules_dir.rglob("*")
+                     if any(p.name.endswith(ext) for ext in (".ko", ".ko.xz", ".ko.gz", ".ko.zst")))
+    if not modules:
+        raise RuntimeError("No modules found; nothing was signed.")
+    if vmlinuz.is_symlink() or modules_dir.is_symlink() or any(p.is_symlink() for p in modules):
+        raise RuntimeError("Unexpected symlink in kernel files; sign this installation manually.")
+    compression = {".xz": ("xz", ["-C", "crc32"]), ".gz": ("gzip", ["-n"]), ".zst": ("zstd", ["-q"])}
+    for module in modules:
+        if module.suffix in compression and not shutil.which(compression[module.suffix][0]):
+            raise RuntimeError(f"Missing compression tool for {module.name}")
+    sign_file = build_sign_file_tool(kernel_src_dir, log_fn)
+    with tempfile.TemporaryDirectory(prefix="kernel-sign-") as tmp:
+        tmp = Path(tmp)
+        pem, signed_image = tmp / "MOK.pem", tmp / "vmlinuz.signed"
+        run_command(["openssl", "x509", "-inform", "DER", "-in", der, "-out", pem], env, log_fn)
+        run_command(["sbsign", "--key", priv, "--cert", pem, "--output", signed_image, vmlinuz], env, log_fn)
+        run_command(["sbverify", "--cert", pem, signed_image], env, log_fn)
+        for module in modules:
+            raw = tmp / "module.ko"
+            packed = tmp / "module.packed"
+            if module.suffix in compression:
+                tool, flags = compression[module.suffix]
+                with raw.open("wb") as output:
+                    subprocess.run([tool, "-dc", str(module)], stdout=output, check=True)
+            else:
+                shutil.copyfile(module, raw)
+            run_command([sign_file, "sha256", priv, der, raw], env, log_fn)
+            staged = raw
+            if module.suffix in compression:
+                with packed.open("wb") as output:
+                    subprocess.run([tool, *flags, "-c", str(raw)], stdout=output, check=True)
+                staged = packed
+            replace_signed_file(staged, module, env, log_fn)
+        run_command(["sudo", "-A", "depmod", "-a", version], env, log_fn)
+        run_command(["sudo", "-A", *initrd_cmd], env, log_fn)
+        replace_signed_file(signed_image, vmlinuz, env, log_fn)
+    log_fn("Signed kernel and modules; initramfs refreshed. Verify module-key trust on this kernel before relying on Secure Boot.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +601,15 @@ class KernelManagerApp:
 
         self.build_proc = None
         self.build_thread = None
-        self.log_queue = queue.Queue()
+        self.log_queue = queue.Queue(maxsize=2000)
+        self.ui_queue = queue.Queue()
+        self.busy = None
+        self.operation_lock = None
+        self.closed = False
+        self.reads_pending = set()
+        self.kernels = []
+        self.build_cancellable = False
+        self.cancel_thread = None
         self.built_kernel_dir = None  # set once a build finishes successfully
         self._prev_cpu_times = None
         self.presets = load_presets()
@@ -494,9 +638,87 @@ class KernelManagerApp:
         self._build_mok_tab()
 
         self.refresh_installed()
+        self._restore_completed_build()
         self.root.after(100, self._poll_log_queue)
         self.root.after(1000, self._update_resource_monitor)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _dispatch(self, callback):
+        if not self.closed:
+            self.ui_queue.put(callback)
+
+    def _read_async(self, key, work, done):
+        if key in self.reads_pending:
+            return
+        self.reads_pending.add(key)
+
+        def worker():
+            try:
+                result = work()
+                self._dispatch(lambda: done(result))
+            except Exception as e:
+                self._dispatch(lambda error=str(e): messagebox.showerror(key, error))
+            finally:
+                self._dispatch(lambda: self.reads_pending.discard(key))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _begin_operation(self, name):
+        if self.busy:
+            messagebox.showinfo("Operation in progress", f"Wait for {self.busy} to finish.")
+            return False
+        handle = None
+        try:
+            KERNEL_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+            handle = (KERNEL_BUILD_DIR / ".operation.lock").open("a")
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if handle:
+                handle.close()
+            messagebox.showerror("Operation unavailable", f"Another kernel operation may be running: {e}")
+            return False
+        self.operation_lock = handle
+        self.busy = name
+        self.start_btn.configure(state="disabled")
+        self.install_btn.configure(state="disabled")
+        return True
+
+    def _finish_operation(self):
+        if self.operation_lock:
+            self.operation_lock.close()
+            self.operation_lock = None
+        self.busy = None
+        self.build_proc = None
+        self.build_cancellable = False
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        ready = self.built_kernel_dir and (Path(self.built_kernel_dir) / ".kernel-manager-complete").is_file()
+        self.install_btn.configure(state="normal" if ready else "disabled")
+        self.refresh_installed()
+        self.refresh_maintenance_tab()
+        self.refresh_logs_tab()
+
+    def _run_operation(self, title, work):
+        if not self._begin_operation(title):
+            return
+        log_win = LogWindow(self.root, title)
+
+        def worker():
+            try:
+                work(log_win.append)
+                log_win.append("\nDone.\n")
+            except Exception as e:
+                log_win.append(f"\n[error] {e}\n")
+            finally:
+                self._dispatch(self._finish_operation)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _restore_completed_build(self):
+        def done(trees):
+            if not self.busy and not self.built_kernel_dir and trees:
+                self.built_kernel_dir = str(trees[0])
+                self.install_btn.configure(state="normal")
+                self._append_log(f"Completed build available: {trees[0]}\n")
+        self._read_async("Completed builds", completed_build_dirs, done)
 
     # ---------------- Installed Kernels tab ----------------
 
@@ -535,33 +757,34 @@ class KernelManagerApp:
         self.tree.pack(fill="both", expand=True)
 
     def refresh_installed(self):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
-        for k in list_installed_kernels():
-            self.tree.insert("", "end", iid=k.version, values=(
-                k.version,
-                "apt-managed" if k.apt_managed else "custom-built",
-                "✓ running" if k.running else "",
-                k.size_str,
-            ))
-        if hasattr(self, "mok_version_combo"):
+        def done(kernels):
+            self.kernels = kernels
+            for row in self.tree.get_children():
+                self.tree.delete(row)
+            for k in kernels:
+                source = "custom-built" if k.manager == "custom" else f"{k.manager}-managed"
+                self.tree.insert("", "end", iid=k.version, values=(
+                    k.version, source, "✓ running" if k.running else "", k.size_str))
             self.refresh_mok_tab()
+        self._read_async("Installed kernels", list_installed_kernels, done)
 
     def check_for_updates(self):
         self.update_label.config(text="Checking kernel.org for the latest stable release…")
 
         def worker():
             latest = latest_stable_version()
-            current = running_kernel().split("-")[0]  # strip -custom suffix etc.
+            current = running_kernel().split("-")[0]
             if latest is None:
-                text = "Couldn't reach kernel.org to check for updates."
-            elif latest == current:
-                text = f"You're up to date — running kernel matches latest stable ({latest})."
-            else:
-                text = f"Update available: latest stable is {latest} (you're running {current})."
-            self.root.after(0, lambda: self.update_label.config(text=text))
-
-        threading.Thread(target=worker, daemon=True).start()
+                return "Couldn't reach kernel.org to check for updates."
+            def version_tuple(value):
+                parts = tuple(map(int, value.split(".")))
+                return parts + (0,) * (3 - len(parts))
+            if not VER_RE.fullmatch(current):
+                return f"Latest stable: {latest}; running release: {current}."
+            if version_tuple(latest) > version_tuple(current):
+                return f"Newer stable release: {latest} (running {current})."
+            return f"No newer stable release (latest {latest}, running {current})."
+        self._read_async("Update check", worker, lambda text: self.update_label.config(text=text))
 
     def on_delete_selected(self):
         sel = self.tree.selection()
@@ -569,9 +792,12 @@ class KernelManagerApp:
             messagebox.showinfo("Delete kernel", "Select a kernel first.")
             return
         version = sel[0]
-        kernels = {k.version: k for k in list_installed_kernels()}
+        kernels = {k.version: k for k in self.kernels}
         kernel = kernels.get(version)
         if kernel is None:
+            return
+        if kernel.manager not in ("apt", "custom"):
+            messagebox.showerror("Delete kernel", "Use the distribution package manager for this kernel.")
             return
         if kernel.running:
             messagebox.showerror("Delete kernel", "You can't delete the kernel that's currently running.")
@@ -585,17 +811,7 @@ class KernelManagerApp:
         ):
             return
 
-        log_win = LogWindow(self.root, f"Deleting {version}")
-
-        def worker():
-            try:
-                delete_kernel(kernel, gui_env(), log_win.append)
-                log_win.append("\nDone.\n")
-                self.root.after(0, self.refresh_installed)
-            except Exception as e:
-                log_win.append(f"\n[error] {e}\n")
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_operation(f"Deleting {version}", lambda log: delete_kernel(kernel, gui_env(), log))
 
     def on_set_boot(self, once: bool):
         sel = self.tree.selection()
@@ -603,44 +819,23 @@ class KernelManagerApp:
             messagebox.showinfo("Boot selection", "Select a kernel first.")
             return
         version = sel[0]
-        entry = grub_entry_title(version)
-        action = "one-time boot (grub-reboot)" if once else "persistent default (grub-set-default)"
-        if not messagebox.askyesno(
-            "Confirm boot selection",
-            f"This assumes the standard Ubuntu GRUB menu layout and will run "
-            f"the equivalent of:\n\n  grub-{'reboot' if once else 'set-default'} "
-            f"\"{entry}\"\n\nas {action}.\n\n"
-            f"If this doesn't match your actual GRUB menu, use 'Show actual "
-            f"GRUB entries' first to check. Continue?"
-        ):
-            return
-
-        log_win = LogWindow(self.root, f"Setting boot kernel: {version}")
-
-        def worker():
-            try:
-                set_default_boot(version, gui_env(), log_win.append, once)
-                log_win.append("\nDone.\n")
-            except Exception as e:
-                log_win.append(f"\n[error] {e}\n")
-
-        threading.Thread(target=worker, daemon=True).start()
+        action = "next boot only" if once else "the default boot"
+        if messagebox.askyesno("Confirm boot selection", f"Select {version} for {action}?"):
+            self._run_operation(f"Setting boot kernel: {version}",
+                                lambda log: set_default_boot(version, gui_env(), log, once))
 
     def on_show_grub_entries(self):
-        titles, error = grub_menu_titles(gui_env())
-        win = tk.Toplevel(self.root)
-        win.title("Actual GRUB menu entries")
-        win.geometry("560x300")
-        ttk.Label(win, text="Menu entry titles found in your grub.cfg "
-                             "(compare against what 'Set as Default Boot' assumes):"
-                  ).pack(anchor="w", padx=8, pady=(8, 4))
-        listbox = tk.Listbox(win)
-        listbox.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        if titles:
-            for t in titles:
-                listbox.insert("end", t)
-        else:
-            listbox.insert("end", error or "(no menuentry lines found)")
+        def done(result):
+            titles, error = result
+            win = tk.Toplevel(self.root)
+            win.title("Actual GRUB menu entries")
+            win.geometry("560x300")
+            ttk.Label(win, text="Menu paths found in grub.cfg:").pack(anchor="w", padx=8, pady=8)
+            listbox = tk.Listbox(win)
+            listbox.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+            for title in titles or [error or "No entries found."]:
+                listbox.insert("end", title)
+        self._read_async("GRUB entries", lambda: grub_menu_titles(gui_env()), done)
 
     # ---------------- Build tab ----------------
 
@@ -650,19 +845,20 @@ class KernelManagerApp:
         opts = ttk.LabelFrame(frame, text="Toolchain options")
         opts.pack(fill="x", padx=4, pady=4)
 
-        self.toolchain_var = tk.StringVar(value=self.presets.get("toolchain", "gcc"))
+        self.toolchain_var = tk.StringVar(value=("clang" if self.presets.get("toolchain") == "clang" else "gcc"))
         ttk.Radiobutton(opts, text="GCC", variable=self.toolchain_var, value="gcc",
                         command=self._sync_lto_state).grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Radiobutton(opts, text="Clang + LLD", variable=self.toolchain_var, value="clang",
                         command=self._sync_lto_state).grid(row=0, column=1, sticky="w", padx=6, pady=4)
 
-        self.lto_var = tk.BooleanVar(value=self.presets.get("lto", False))
+        self.lto_var = tk.BooleanVar(value=self.presets.get("lto") is True)
         self.lto_check = ttk.Checkbutton(opts, text="Enable ThinLTO (Clang only, slow/RAM-heavy)",
                                           variable=self.lto_var,
                                           state="normal" if self.toolchain_var.get() == "clang" else "disabled")
         self.lto_check.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=2)
+        self._sync_lto_state()
 
-        self.debug_var = tk.BooleanVar(value=self.presets.get("debug", False))
+        self.debug_var = tk.BooleanVar(value=self.presets.get("debug") is True)
         ttk.Checkbutton(opts, text="Keep full debug info (needs 8GB+ RAM)",
                          variable=self.debug_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=2)
 
@@ -711,8 +907,7 @@ class KernelManagerApp:
             self.lto_check.configure(state="disabled")
 
     def _append_log(self, text: str):
-        self.log_text.insert("end", text)
-        self.log_text.see("end")
+        append_bounded(self.log_text, text)
 
     def _update_resource_monitor(self):
         try:
@@ -743,6 +938,9 @@ class KernelManagerApp:
         self.root.after(2000, self._update_resource_monitor)
 
     def _on_close(self):
+        if self.busy:
+            messagebox.showinfo("Operation in progress", "Wait for the active operation to finish. For a build, use Stop when available first.")
+            return
         self.presets = {
             "toolchain": self.toolchain_var.get(),
             "lto": self.lto_var.get(),
@@ -750,16 +948,15 @@ class KernelManagerApp:
             "jobs": self.jobs_var.get(),
         }
         save_presets(self.presets)
+        self.closed = True
         self.root.destroy()
 
     def start_build(self):
-        if self.build_proc is not None:
+        jobs = self.jobs_var.get()
+        if not re.fullmatch(r"[1-9][0-9]*", jobs):
+            messagebox.showerror("Build", "Parallel jobs must be a positive integer.")
             return
-        if not BUILD_SCRIPT.exists():
-            messagebox.showerror("Build", f"Can't find {BUILD_SCRIPT}")
-            return
-
-        cmd = ["bash", str(BUILD_SCRIPT), "--jobs", self.jobs_var.get()]
+        cmd = ["bash", str(BUILD_SCRIPT), "--jobs", jobs]
         if self.toolchain_var.get() == "clang":
             cmd.append("--clang")
             if self.lto_var.get():
@@ -768,114 +965,116 @@ class KernelManagerApp:
             cmd.append("--full-debug-info")
         if self.force_var.get():
             cmd.append("--force")
+        self._start_stream(cmd, SCRIPT_DIR, "build")
 
-        save_presets({
-            "toolchain": self.toolchain_var.get(),
-            "lto": self.lto_var.get(),
-            "debug": self.debug_var.get(),
-            "jobs": self.jobs_var.get(),
-        })
-
-        self.log_text.delete("1.0", "end")
-        self._append_log(f"$ {' '.join(cmd)}\n\n")
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self.install_btn.configure(state="disabled")
-        self.built_kernel_dir = None
-
-        env = gui_env()
+    def _start_stream(self, cmd, cwd, kind):
+        if not Path(cmd[1]).is_file():
+            messagebox.showerror(kind, f"Missing script: {cmd[1]}")
+            return
+        try:
+            env = gui_env()
+        except Exception as e:
+            messagebox.showerror(kind, str(e))
+            return
+        if not self._begin_operation(kind):
+            return
+        if kind == "build":
+            self.built_kernel_dir = None
+            self.log_text.delete("1.0", "end")
+            save_presets({"toolchain": self.toolchain_var.get(), "lto": self.lto_var.get(),
+                          "debug": self.debug_var.get(), "jobs": self.jobs_var.get()})
+        self._append_log(f"$ {shlex.join(cmd)} (in {cwd})\n")
+        fd = self.operation_lock.fileno()
+        env["KERNEL_MANAGER_LOCK_FD"] = str(fd)
 
         def worker():
-            self.build_proc = subprocess.Popen(
-                cmd, cwd=str(SCRIPT_DIR), env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1
-            )
-            for line in self.build_proc.stdout:
-                self.log_queue.put(line)
-                # Watch for the build script telling us where the built
-                # kernel source directory is, so "Install Now" knows where
-                # to run install-custom-kernel.sh from.
-                m = re.search(r"cd (.+/linux-[\d.]+)\s*$", line)
-                if m:
-                    self.built_kernel_dir = m.group(1).strip()
-            rc = self.build_proc.wait()
-            self.log_queue.put(f"\n[build finished with exit code {rc}]\n")
-            self.build_proc = None
-            self.root.after(0, lambda: self._on_build_finished(rc))
-
+            rc, built_dir = 1, None
+            proc = None
+            try:
+                proc = subprocess.Popen(cmd, cwd=str(cwd), env=env,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, errors="replace", bufsize=1,
+                                        start_new_session=True, pass_fds=(fd,))
+                self.build_proc = proc
+                with proc.stdout:
+                    for line in proc.stdout:
+                        self.log_queue.put(line[:65536])
+                        if kind == "build" and line.strip() == "KERNEL_MANAGER_CANCELLABLE=1":
+                            self._dispatch(self._allow_build_stop)
+                        if kind == "build" and line.startswith("KERNEL_MANAGER_BUILD_DIR="):
+                            candidate = Path(line.rstrip("\n").split("=", 1)[1])
+                            if candidate.parent.resolve() == KERNEL_BUILD_DIR.resolve() and (candidate / ".kernel-manager-complete").is_file():
+                                built_dir = str(candidate)
+                rc = proc.wait()
+            except Exception as e:
+                self.log_queue.put(f"\n[error] {e}\n")
+                if proc is not None:
+                    if kind == "build" and self.build_cancellable:
+                        terminate_build_group(proc)
+                    else:
+                        # Do not interrupt an installation or package transaction.
+                        proc.wait()
+            finally:
+                if self.cancel_thread is not None:
+                    self.cancel_thread.join()
+                    self.cancel_thread = None
+                    rc = -signal.SIGTERM
+                self.log_queue.put(f"\n[{kind} finished with exit code {rc}]\n")
+                self._dispatch(lambda: self._stream_finished(kind, rc, built_dir))
+                send_notification("Kernel Manager", f"{kind.capitalize()} {'finished' if rc == 0 else 'failed'}. Check the log.")
         self.build_thread = threading.Thread(target=worker, daemon=True)
         self.build_thread.start()
 
-    def _on_build_finished(self, rc: int):
-        self.start_btn.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
-        if rc == 0 and self.built_kernel_dir:
-            self.install_btn.configure(state="normal")
-            send_notification("Kernel Manager", "Build finished successfully. Ready to install.")
+    def _allow_build_stop(self):
+        if self.busy == "build":
+            self.build_cancellable = True
+            self.stop_btn.configure(state="normal")
+
+    def _stream_finished(self, kind, rc, built_dir):
+        if self.cancel_thread is not None:
+            if self.cancel_thread.is_alive():
+                self.root.after(100, lambda: self._stream_finished(kind, rc, built_dir))
+                return
+            self.cancel_thread = None
+            rc = -signal.SIGTERM
+        if kind == "build":
+            self.built_kernel_dir = built_dir if rc == 0 else None
         elif rc == 0:
-            self._append_log("\n[warn] Build succeeded but couldn't detect the "
-                              "kernel source directory automatically — check the "
-                              "log above and run install-custom-kernel.sh manually.\n")
-            send_notification("Kernel Manager", "Build finished successfully.")
-        else:
-            send_notification("Kernel Manager", f"Build failed (exit code {rc}). Check the log.")
+            self.built_kernel_dir = None
+            self._append_log("Installed. Verify the boot menu, signatures, and fallback before rebooting.\n")
+        self._finish_operation()
 
     def stop_build(self):
-        if self.build_proc is not None:
-            self._append_log("\n[stopping build...]\n")
-            self.build_proc.terminate()
+        if self.busy == "build" and self.build_cancellable and self.build_proc:
+            self._append_log("\n[stopping build and its child processes...]\n")
+            self.stop_btn.configure(state="disabled")
+            self.build_cancellable = False
+            proc = self.build_proc
+            thread = threading.Thread(target=terminate_build_group, args=(proc,), daemon=True)
+            thread.start()
+            self.cancel_thread = thread
 
     def start_install(self):
         if not self.built_kernel_dir:
-            messagebox.showerror("Install", "No successfully built kernel to install.")
+            messagebox.showerror("Install", "No completed kernel build is available.")
             return
-        if not INSTALL_SCRIPT.exists():
-            messagebox.showerror("Install", f"Can't find {INSTALL_SCRIPT}")
-            return
-
-        # Make sure install-custom-kernel.sh is present in the kernel dir
-        # (build-custom-kernel.sh normally copies it there already).
-        dest = Path(self.built_kernel_dir) / "install-custom-kernel.sh"
-        if not dest.exists():
-            shutil.copy(INSTALL_SCRIPT, dest)
-            dest.chmod(0o755)
-
-        self._append_log(f"\n$ cd {self.built_kernel_dir} && ./install-custom-kernel.sh\n\n")
-        self.install_btn.configure(state="disabled")
-        env = gui_env()
-
-        def worker():
-            proc = subprocess.Popen(
-                ["bash", str(dest)], cwd=self.built_kernel_dir, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1
-            )
-            for line in proc.stdout:
-                self.log_queue.put(line)
-            rc = proc.wait()
-            self.log_queue.put(f"\n[install finished with exit code {rc}]\n")
-            if rc == 0:
-                self.log_queue.put(
-                    "\nInstalled. Reboot and select the new kernel from the "
-                    "GRUB menu to try it — your previous kernel is still there "
-                    "as a fallback.\n"
-                )
-                send_notification("Kernel Manager", "Kernel installed. Reboot to try it.")
-            else:
-                send_notification("Kernel Manager", f"Install failed (exit code {rc}). Check the log.")
-            self.root.after(0, lambda: self.refresh_installed())
-
-        threading.Thread(target=worker, daemon=True).start()
+        # Always use the current installer, never a stale source-tree copy.
+        self._start_stream(["bash", str(INSTALL_SCRIPT)], Path(self.built_kernel_dir), "install")
 
     def _poll_log_queue(self):
         try:
-            while True:
-                line = self.log_queue.get_nowait()
-                self._append_log(line)
+            for _ in range(200):
+                self._append_log(self.log_queue.get_nowait())
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_log_queue)
+        try:
+            for _ in range(50):
+                callback = self.ui_queue.get_nowait()
+                callback()
+        except queue.Empty:
+            pass
+        if not self.closed:
+            self.root.after(100, self._poll_log_queue)
 
     # ---------------- Build Logs tab ----------------
 
@@ -919,12 +1118,20 @@ class KernelManagerApp:
         text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         try:
-            text.insert("end", path.read_text(errors="ignore"))
+            with path.open("rb") as source:
+                source.seek(0, os.SEEK_END)
+                size = source.tell()
+                source.seek(max(0, size - 1024 * 1024))
+                content = source.read().decode(errors="replace")
+            text.insert("end", ("[Showing the last 1 MiB of this log]\n" if size > 1024 * 1024 else "") + content)
         except Exception as e:
             text.insert("end", f"Couldn't read log: {e}")
         text.configure(state="disabled")
 
     def on_delete_log(self):
+        if self.busy:
+            messagebox.showinfo("Build logs", "Wait for the active operation before deleting logs.")
+            return
         sel = self.logs_tree.selection()
         if not sel:
             messagebox.showinfo("Build logs", "Select a log file first.")
@@ -934,8 +1141,8 @@ class KernelManagerApp:
         for s in sel:
             try:
                 Path(s).unlink()
-            except Exception:
-                pass
+            except OSError as e:
+                messagebox.showerror("Delete log", str(e))
         self.refresh_logs_tab()
 
     # ---------------- Maintenance tab ----------------
@@ -970,20 +1177,21 @@ class KernelManagerApp:
         self.refresh_maintenance_tab()
 
     def refresh_maintenance_tab(self):
-        for row in self.maint_tree.get_children():
-            self.maint_tree.delete(row)
-        total = "?"
-        if KERNEL_BUILD_DIR.exists():
-            try:
+        def work():
+            total = "0"
+            if KERNEL_BUILD_DIR.exists():
                 total = subprocess.check_output(["du", "-sh", str(KERNEL_BUILD_DIR)], text=True).split()[0]
-            except Exception:
-                pass
-        self.disk_usage_label.configure(text=f"Total size of {KERNEL_BUILD_DIR}: {total}")
+            return total, running_kernel().split("-")[0], kernel_build_source_dirs()
 
-        current_src = f"linux-{running_kernel().split('-')[0]}"
-        for path, size in kernel_build_source_dirs():
-            note = "  (matches running kernel)" if path.name == current_src else ""
-            self.maint_tree.insert("", "end", iid=str(path), values=(path.name + note, size))
+        def done(result):
+            total, current, dirs = result
+            for row in self.maint_tree.get_children():
+                self.maint_tree.delete(row)
+            self.disk_usage_label.configure(text=f"Total size of {KERNEL_BUILD_DIR}: {total}")
+            for path, size in dirs:
+                note = "  (matches running kernel)" if path.name == f"linux-{current}" else ""
+                self.maint_tree.insert("", "end", iid=str(path), values=(path.name + note, size))
+        self._read_async("Source tree sizes", work, done)
 
     def on_clean_source_dirs(self):
         sel = self.maint_tree.selection()
@@ -1001,12 +1209,14 @@ class KernelManagerApp:
             f"Permanently delete {len(sel)} extracted source tree(s)?{warn}"
         ):
             return
-        for s in sel:
-            try:
-                shutil.rmtree(s)
-            except Exception as e:
-                messagebox.showerror("Maintenance", f"Failed to remove {s}: {e}")
-        self.refresh_maintenance_tab()
+        def work(log):
+            for selected in sel:
+                path = Path(selected)
+                if path.is_symlink() or path.parent.resolve() != KERNEL_BUILD_DIR.resolve() or not path.name.startswith("linux-"):
+                    raise RuntimeError(f"Refusing unexpected source path: {path}")
+                shutil.rmtree(path)
+                log(f"Removed {path}\n")
+        self._run_operation("Cleaning source trees", work)
 
     # ---------------- System Info tab ----------------
 
@@ -1019,36 +1229,41 @@ class KernelManagerApp:
         self.refresh_sysinfo_tab()
 
     def refresh_sysinfo_tab(self):
-        cpu = cpu_info()
-        mem = mem_swap_info()
-        mem_gb = mem.get("MemTotal", 0) / 1024 / 1024
-        swap_gb = mem.get("SwapTotal", 0) / 1024 / 1024
-        try:
-            cmdline = Path("/proc/cmdline").read_text().strip()
-        except Exception:
-            cmdline = "unknown"
-        try:
-            uptime_s = float(Path("/proc/uptime").read_text().split()[0])
-            uptime_str = f"{int(uptime_s // 3600)}h {int((uptime_s % 3600) // 60)}m"
-        except Exception:
-            uptime_str = "unknown"
+        def work():
+            cpu = cpu_info()
+            mem = mem_swap_info()
+            mem_gb = mem.get("MemTotal", 0) / 1024 / 1024
+            swap_gb = mem.get("SwapTotal", 0) / 1024 / 1024
+            try:
+                cmdline = Path("/proc/cmdline").read_text().strip()
+            except Exception:
+                cmdline = "unknown"
+            try:
+                uptime_s = float(Path("/proc/uptime").read_text().split()[0])
+                uptime_str = f"{int(uptime_s // 3600)}h {int((uptime_s % 3600) // 60)}m"
+            except Exception:
+                uptime_str = "unknown"
 
-        lines = [
-            f"Running kernel:     {running_kernel()}",
-            f"CPU:                {cpu['model']}",
-            f"CPU cores:          {cpu['cores']}",
-            f"Total RAM:          {mem_gb:.1f} GB",
-            f"Total swap:         {swap_gb:.1f} GB",
-            f"Secure Boot:        {secure_boot_state()}",
-            f"Uptime:             {uptime_str}",
-            "",
-            "Kernel command line:",
-            cmdline,
-        ]
-        self.sysinfo_text.configure(state="normal")
-        self.sysinfo_text.delete("1.0", "end")
-        self.sysinfo_text.insert("end", "\n".join(lines))
-        self.sysinfo_text.configure(state="disabled")
+            lines = [
+                f"Running kernel:     {running_kernel()}",
+                f"CPU:                {cpu['model']}",
+                f"CPU cores:          {cpu['cores']}",
+                f"Total RAM:          {mem_gb:.1f} GB",
+                f"Total swap:         {swap_gb:.1f} GB",
+                f"Secure Boot:        {secure_boot_state()}",
+                f"Uptime:             {uptime_str}",
+                "",
+                "Kernel command line:",
+                cmdline,
+            ]
+            return "\n".join(lines)
+
+        def done(text):
+            self.sysinfo_text.configure(state="normal")
+            self.sysinfo_text.delete("1.0", "end")
+            self.sysinfo_text.insert("end", text)
+            self.sysinfo_text.configure(state="disabled")
+        self._read_async("System information", work, done)
 
     # ---------------- Secure Boot (MOK) tab ----------------
 
@@ -1056,7 +1271,7 @@ class KernelManagerApp:
         frame = self.mok_tab
 
         ttk.Label(frame, text=
-            "Signing your custom kernel/modules lets you keep Secure Boot enabled.\n"
+            "Secure Boot requires a signed kernel, signed modules, and a trusted enrolled key.\n"
             "Steps: 1) generate a signing key once  2) enroll it with the firmware "
             "(needs a reboot to confirm)  3) sign a kernel's files after each build.",
             wraplength=780, justify="left"
@@ -1091,58 +1306,54 @@ class KernelManagerApp:
         self.mok_key_label.configure(
             text="Key found." if mok_key_exists() else "No key yet — click Generate Key."
         )
-        versions = [k.version for k in list_installed_kernels() if not k.apt_managed]
+        versions = [k.version for k in self.kernels if k.manager == "custom"]
         self.mok_version_combo.configure(values=versions)
-        if versions and not self.mok_version_var.get():
-            self.mok_version_var.set(versions[0])
+        if self.mok_version_var.get() not in versions:
+            self.mok_version_var.set(versions[0] if versions else "")
 
     def on_generate_mok_key(self):
         if mok_key_exists() and not messagebox.askyesno(
             "Generate key", "A key already exists — generate a new one and replace it?"
         ):
             return
-        log_win = LogWindow(self.root, "Generating MOK signing key")
-
-        def worker():
-            try:
-                generate_mok_key(log_win.append)
-                log_win.append("\nDone. Key stored in: " + str(MOK_DIR) + "\n")
-                self.root.after(0, self.refresh_mok_tab)
-            except Exception as e:
-                log_win.append(f"\n[error] {e}\n")
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_operation("Generating MOK signing key", generate_mok_key)
 
     def on_enroll_mok_key(self):
         if not mok_key_exists():
             messagebox.showerror("Enroll key", "Generate a key first.")
             return
-        log_win = LogWindow(self.root, "Enrolling MOK key")
-        try:
-            enroll_mok_key_in_terminal(log_win.append)
-            log_win.append(
-                "\nComplete the password prompts in the terminal window, then "
-                "reboot and follow the blue MOK Manager screen to finish "
-                "enrollment (this last step can't be automated by any script)."
-            )
-        except Exception as e:
-            log_win.append(f"\n[error] {e}\n")
+        self._run_operation("Enrolling MOK key", enroll_mok_key_in_terminal)
 
     def on_sign_kernel(self):
         version = self.mok_version_var.get()
         if not version:
             messagebox.showinfo("Sign kernel", "Select a kernel version first.")
             return
-        log_win = LogWindow(self.root, f"Signing {version}")
-        env = gui_env()
+        self._run_operation(f"Signing {version}", lambda log: sign_kernel_and_modules(version, gui_env(), log))
 
-        def worker():
-            try:
-                sign_kernel_and_modules(version, env, log_win.append)
-            except Exception as e:
-                log_win.append(f"\n[error] {e}\n")
 
-        threading.Thread(target=worker, daemon=True).start()
+def terminate_build_group(proc):
+    """Only used after the privileged dependency phase has completed."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    # Give compiler children time to exit, then reap anything still in the group.
+    threading.Event().wait(3)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def append_bounded(widget, text):
+    limit = 1024 * 1024
+    widget.insert("end", text[-limit:])
+    length = widget.count("1.0", "end", "chars")[0]
+    if length > limit:
+        widget.delete("1.0", f"1.0+{length - limit}c")
+    widget.see("end")
 
 
 class LogWindow:
@@ -1153,21 +1364,31 @@ class LogWindow:
         self.win.geometry("600x300")
         self.text = tk.Text(self.win, bg="black", fg="#33ff33", font=("Monospace", 9))
         self.text.pack(fill="both", expand=True)
-        self.queue = queue.Queue()
+        self.queue = queue.Queue(maxsize=2000)
+        self.closed = False
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
         self.win.after(100, self._poll)
 
+    def _close(self):
+        self.closed = True
+        self.win.destroy()
+
     def append(self, s: str):
-        self.queue.put(s)
+        # A closed log window must not block or abort the underlying operation.
+        if not self.closed:
+            try:
+                self.queue.put_nowait(s[-65536:])
+            except queue.Full:
+                pass
 
     def _poll(self):
         try:
-            while True:
-                s = self.queue.get_nowait()
-                self.text.insert("end", s)
-                self.text.see("end")
+            for _ in range(200):
+                append_bounded(self.text, self.queue.get_nowait())
         except queue.Empty:
             pass
-        self.win.after(100, self._poll)
+        if not self.closed:
+            self.win.after(100, self._poll)
 
 
 def main():
@@ -1175,7 +1396,12 @@ def main():
         print(f"Expected build-custom-kernel.sh and install-custom-kernel.sh "
               f"next to this script in {SCRIPT_DIR}", file=sys.stderr)
         sys.exit(1)
-    root = tk.Tk()
+    try:
+        gui_env()
+        root = tk.Tk()
+    except (RuntimeError, tk.TclError) as e:
+        print(f"Cannot start Kernel Manager: {e}", file=sys.stderr)
+        sys.exit(1)
     app = KernelManagerApp(root)
     root.mainloop()
 

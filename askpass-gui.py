@@ -11,11 +11,12 @@ askpass program.
 This is used by Kernel Manager GUI; it also works standalone:
     SUDO_ASKPASS=/path/to/askpass-gui.py sudo -A whoami
 """
+from typing import Optional
 import sys
 import tkinter as tk
 
 
-def ask_password() -> str:
+def ask_password() -> Optional[str]:
     root = tk.Tk()
     root.title("Authentication required")
     root.resizable(False, False)
@@ -47,6 +48,7 @@ def ask_password() -> str:
         result["value"] = None
         root.destroy()
 
+    root.protocol("WM_DELETE_WINDOW", cancel)
     entry.bind("<Return>", submit)
     entry.bind("<Escape>", cancel)
 

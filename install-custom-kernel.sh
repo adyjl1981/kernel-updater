@@ -1,89 +1,118 @@
 #!/usr/bin/env bash
-#
-# install-custom-kernel.sh
-#
-# Installs an already-built kernel: runs `make modules_install` and
-# `make install`, then updates the bootloader (GRUB). This is the last
-# step after build-custom-kernel.sh has finished compiling successfully —
-# split out separately so you can re-run just the install step without
-# rebuilding, or install a kernel you built manually.
-#
-# USAGE:
-#   Run this from inside the kernel source directory you just built, e.g.:
-#     cd ~/kernel-build/linux-7.1.3
-#     ~/Kernel/install-custom-kernel.sh
-#
+# Install a completed, trusted kernel source tree from its working directory.
+# Build options recorded by build-custom-kernel.sh are reused verbatim.
+# Manually built trees are accepted only when their release matches make's
+# current settings. No existing installed release is overwritten.
 set -euo pipefail
 
-log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
-warn() { echo -e "\n\033[1;33m[warn]\033[0m $*"; }
-err()  { echo -e "\n\033[1;31m[error]\033[0m $*"; exit 1; }
+log()  { printf '\n==> %s\n' "$*"; }
+warn() { printf '\n[warn] %s\n' "$*" >&2; }
+err()  { printf '\n[error] %s\n' "$*" >&2; exit 1; }
 
-# Transparent sudo wrapper: if SUDO_ASKPASS is set (the GUI app sets this so
-# it can supply a password dialog instead of a terminal prompt), use `-A` to
-# read the password from that helper. Otherwise behaves exactly like a plain
-# `sudo` call, so nothing changes when this script is run directly from a
-# terminal.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 run_sudo() {
-  if [[ -n "${SUDO_ASKPASS:-}" ]]; then
-    sudo -A "$@"
-  else
-    sudo "$@"
-  fi
+  local opts=(--preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE)
+  [[ -z ${SUDO_ASKPASS:-} ]] || opts+=(-A)
+  sudo "${opts[@]}" "$@"
 }
 
-[[ $EUID -eq 0 ]] && err "Run this as a normal user (it will sudo when needed), not as root."
-
-# Prevent apt/dpkg/needrestart from popping up interactive dialogs (e.g. the
-# initramfs/update-grub steps can trigger a "restart services?" prompt).
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
-
-# Ask for the sudo password once up front, then keep it alive in the
-# background so a slow modules_install/mkinitramfs/grub run never stops to
-# re-prompt partway through.
-log "Requesting sudo access up front (used throughout the script)"
-run_sudo -v
-( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
-SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
-
-# Sanity check: make sure we're actually inside a built kernel source tree
-[[ -f "Makefile" && -d "kernel" && -f ".config" ]] || \
-  err "This doesn't look like a kernel source directory (no Makefile/.config found).
-  cd into the linux-<version> directory you built first, e.g.:
-    cd ~/kernel-build/linux-7.1.3"
-
-[[ -f "vmlinux" || -f "arch/x86/boot/bzImage" ]] || \
-  warn "Couldn't find a built vmlinux/bzImage — did the build actually finish? Continuing anyway."
-
-log "Installing kernel modules (requires sudo)"
-run_sudo make modules_install
-
-log "Installing kernel image, config, System.map, and updating initramfs (requires sudo)"
-run_sudo make install
-
-log "Updating bootloader"
-if command -v update-grub >/dev/null 2>&1; then
-  run_sudo update-grub
-elif [[ -f /etc/default/grub ]] && command -v grub-mkconfig >/dev/null 2>&1; then
-  run_sudo grub-mkconfig -o /boot/grub/grub.cfg
-elif command -v grub2-mkconfig >/dev/null 2>&1; then
-  run_sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+[[ $EUID -ne 0 ]] || err "Run this as a normal user; it will sudo when needed."
+[[ $# -eq 0 ]] || err "Run without arguments from the completed source tree."
+mkdir -p "$HOME/kernel-build"
+if [[ ${KERNEL_MANAGER_LOCK_FD:-} =~ ^[0-9]+$ ]]; then
+  exec 9>&"$KERNEL_MANAGER_LOCK_FD"
 else
-  warn "Couldn't detect a GRUB update command — update your bootloader config manually."
+  exec 9>"$HOME/kernel-build/.operation.lock"
 fi
+flock -n 9 || err "Another kernel operation is running."
 
-# Secure Boot heads-up, since an unsigned custom kernel commonly won't boot
-if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
-  warn "Secure Boot is ENABLED. This kernel is unsigned, so it may refuse to boot."
-  warn "If the new entry fails at boot, either disable Secure Boot temporarily,"
-  warn "or sign the kernel/modules yourself via MOK enrollment."
+[[ -f Makefile && -d kernel && -s .config && -s vmlinux && -s System.map && -s include/config/kernel.release ]] ||
+  err "Incomplete kernel build. Run this inside a successfully built source tree."
+MAKE_ARGS=()
+if [[ -f .kernel-manager-make-args ]]; then
+  [[ -f .kernel-manager-complete && -s .kernel-manager-checksums ]] || err "The recorded build did not finish."
+  sha256sum --status -c .kernel-manager-checksums || err "Build artifacts or settings changed. Rebuild before installing."
+  mapfile -d '' -t MAKE_ARGS < .kernel-manager-make-args
+  for arg in "${MAKE_ARGS[@]}"; do
+    [[ $arg =~ ^(LOCALVERSION|KCFLAGS|CC|LLVM|LLVM_IAS)= ]] || err "Invalid saved make argument."
+  done
 fi
+RELEASE=$(cat include/config/kernel.release)
+[[ $RELEASE =~ ^[0-9]+\.[0-9]+[a-zA-Z0-9._+-]*$ ]] || err "Invalid kernel release."
+[[ "$RELEASE" != "$(uname -r)" ]] || err "Refusing to replace the running kernel."
+[[ $(make -s "${MAKE_ARGS[@]}" kernelrelease) == "$RELEASE" ]] ||
+  err "Build/install release mismatch. Rebuild with recorded toolchain settings."
+IMAGE=$(make -s "${MAKE_ARGS[@]}" image_name)
+[[ "$IMAGE" == arch/* && "$IMAGE" != *..* && -s "$IMAGE" ]] || err "No completed kernel boot image."
+if [[ -f .kernel-manager-make-args ]]; then
+  sha256sum --status -c .kernel-manager-checksums || err "Configuration changed while checking the build. Rebuild before installing."
+fi
+for target in "/lib/modules/$RELEASE" "/boot/vmlinuz-$RELEASE" "/boot/config-$RELEASE" "/boot/System.map-$RELEASE" "/boot/initrd.img-$RELEASE" "/boot/initramfs-$RELEASE.img"; do
+  [[ ! -e "$target" && ! -L "$target" ]] || err "Already exists: $target. Refusing to overwrite this release; use a different --localversion."
+done
 
-log "Done!"
-echo "Your previous kernel remains available in the GRUB boot menu as a fallback."
-echo "Reboot and select the new kernel entry to test it:"
-echo "    sudo reboot"
-echo
-echo "After rebooting, confirm with:  uname -r"
+# Fail before touching system files if this boot layout is unsupported.
+command -v installkernel >/dev/null || err "No installkernel helper; this distribution needs a manual kernel installation."
+if command -v update-initramfs >/dev/null; then
+  INITRAMFS=update-initramfs
+  INITRD="/boot/initrd.img-$RELEASE"
+elif command -v dracut >/dev/null; then
+  INITRAMFS=dracut
+  INITRD="/boot/initramfs-$RELEASE.img"
+else
+  err "No supported initramfs generator (update-initramfs or dracut). Install manually for this distribution."
+fi
+if [[ -f /boot/grub/grub.cfg ]] && command -v update-grub >/dev/null; then
+  GRUB=(update-grub)
+  GRUB_CFG=/boot/grub/grub.cfg
+elif [[ -f /boot/grub/grub.cfg ]] && command -v grub-mkconfig >/dev/null; then
+  GRUB=(grub-mkconfig -o /boot/grub/grub.cfg)
+  GRUB_CFG=/boot/grub/grub.cfg
+elif [[ -f /boot/grub2/grub.cfg ]] && command -v grub2-mkconfig >/dev/null; then
+  GRUB=(grub2-mkconfig -o /boot/grub2/grub.cfg)
+  GRUB_CFG=/boot/grub2/grub.cfg
+else
+  err "No supported existing GRUB configuration. Install manually for this bootloader."
+fi
+if [[ -r "$GRUB_CFG" ]]; then
+  GRUB_TEXT=$(cat "$GRUB_CFG")
+else
+  GRUB_TEXT=$(run_sudo cat "$GRUB_CFG")
+fi
+if grep -Eq '^[[:space:]]*blscfg([[:space:]]|$)' <<< "$GRUB_TEXT"; then
+  err "BLS installations require the distribution kernel-install tooling. Install manually."
+fi
+BOOT_FREE=$(df -Pk /boot | awk 'END {print $4}')
+BOOT_NEEDED=$(( $(du -k "$IMAGE" | cut -f1) + 262144 ))
+(( BOOT_FREE >= BOOT_NEEDED )) || err "Insufficient /boot space for the image and initramfs (256 MiB reserve)."
+MODULE_KB=$(find . -type f -name '*.ko' -printf '%s\n' | awk '{n+=$1} END {printf "%.0f", n/1024+65536}')
+MODULE_FREE=$(df -Pk /lib/modules | awk 'END {print $4}')
+(( MODULE_FREE >= MODULE_KB )) || err "Insufficient space for kernel modules."
+
+if command -v mokutil >/dev/null && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+  warn "Secure Boot is enabled. Sign this kernel and its modules before attempting to boot it."
+fi
+log "Installing $RELEASE; failures after this point may require manual cleanup"
+trap 'warn "Installation failed or was interrupted. Do not reboot until /boot, modules, and GRUB have been checked."' ERR
+if grep -qx 'CONFIG_MODULES=y' .config; then
+  run_sudo make "${MAKE_ARGS[@]}" modules_install
+fi
+run_sudo make "${MAKE_ARGS[@]}" install
+[[ -s "/boot/vmlinuz-$RELEASE" && -s "/boot/config-$RELEASE" && -s "/boot/System.map-$RELEASE" ]] ||
+  err "installkernel did not create the expected boot files. Check the installation manually."
+if [[ "$INITRAMFS" == update-initramfs ]]; then
+  MODE=-c
+  [[ ! -e "$INITRD" ]] || MODE=-u
+  run_sudo update-initramfs "$MODE" -k "$RELEASE"
+else
+  run_sudo dracut --force "$INITRD" "$RELEASE"
+fi
+[[ -s "$INITRD" ]] || err "No initramfs was produced. Do not reboot into this kernel."
+run_sudo "${GRUB[@]}"
+# BLS configurations may keep entries in separate files rather than grub.cfg.
+if ! run_sudo grep -Fq -- "$RELEASE" "$GRUB_CFG"; then
+  err "Could not verify a GRUB entry for $RELEASE. Check your boot entries manually before rebooting."
+fi
+log "Installed $RELEASE"
+echo "Verify the GRUB menu, Secure Boot signatures, and a working fallback before rebooting."
+echo "After rebooting, confirm with: uname -r"

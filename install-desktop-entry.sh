@@ -12,27 +12,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 APP_SCRIPT="$SCRIPT_DIR/kernel-manager-gui.py"
 ICON_FILE="$SCRIPT_DIR/kernel-manager-icon.png"
-DESKTOP_DIR="$HOME/.local/share/applications"
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 DESKTOP_FILE="$DESKTOP_DIR/kernel-manager-gui.desktop"
 
 [[ -f "$APP_SCRIPT" ]] || { echo "Can't find kernel-manager-gui.py in $SCRIPT_DIR"; exit 1; }
 [[ -f "$ICON_FILE"  ]] || { echo "Can't find kernel-manager-icon.png in $SCRIPT_DIR"; exit 1; }
 
-chmod +x "$APP_SCRIPT"
+# Tkinter is needed by both the app and its password dialog.
+python3 -c 'import tkinter' || { echo "Install Python 3 Tkinter before creating the launcher." >&2; exit 1; }
+[[ -r "$SCRIPT_DIR/askpass-gui.py" && -x "$SCRIPT_DIR/askpass-gui.py" ]] || { echo "askpass-gui.py must be readable and executable" >&2; exit 1; }
 mkdir -p "$DESKTOP_DIR"
 
-cat > "$DESKTOP_FILE" << EOF
-[Desktop Entry]
-Type=Application
-Version=1.0
-Name=Kernel Manager
-Comment=Build, install, and manage custom Linux kernels
-Exec=python3 "$APP_SCRIPT"
-Icon=$ICON_FILE
-Terminal=false
-Categories=System;Settings;
-StartupNotify=true
-EOF
+# Desktop-entry escaping has two layers: string values, then Exec arguments.
+python3 - "$DESKTOP_FILE" "$APP_SCRIPT" "$ICON_FILE" <<'PYTHON'
+import sys
+from pathlib import Path
+
+def value(text):
+    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+def argument(text):
+    escaped = "".join("\\" + c if c in '\\"`$' else "%%" if c == "%" else c for c in text)
+    return value('"' + escaped + '"')
+
+output, app, icon = sys.argv[1:]
+Path(output).write_text(
+    "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Kernel Manager\n"
+    "Comment=Build, install, and manage custom Linux kernels\n"
+    f"Exec=python3 {argument(app)}\nIcon={value(icon)}\n"
+    "Terminal=false\nCategories=System;Settings;\nStartupNotify=true\n"
+)
+PYTHON
 
 chmod +x "$DESKTOP_FILE"
 
