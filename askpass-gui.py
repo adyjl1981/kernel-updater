@@ -14,18 +14,22 @@ This is used by Kernel Manager GUI; it also works standalone:
 from typing import Optional
 import sys
 import tkinter as tk
+from tkinter import ttk
+
+from ubuntu_theme import apply_theme
 
 
 def ask_password() -> Optional[str]:
     root = tk.Tk()
     root.title("Authentication required")
+    apply_theme(root)
     root.resizable(False, False)
     # Keep it on top and roughly centered
     root.attributes("-topmost", True)
 
     result = {"value": None}
 
-    frame = tk.Frame(root, padx=20, pady=16)
+    frame = ttk.Frame(root, padding=(24, 20))
     frame.pack()
 
     label_text = "sudo needs your password to continue"
@@ -33,11 +37,11 @@ def ask_password() -> Optional[str]:
         # sudo passes a descriptive prompt as argv[1], e.g. "[sudo] password for adrian: "
         label_text = sys.argv[1].strip()
 
-    tk.Label(frame, text=label_text, wraplength=320, justify="left").pack(pady=(0, 10))
+    ttk.Label(frame, text=label_text, wraplength=360, justify="left").pack(pady=(0, 10))
 
     entry_var = tk.StringVar()
-    entry = tk.Entry(frame, textvariable=entry_var, show="*", width=30)
-    entry.pack()
+    entry = ttk.Entry(frame, textvariable=entry_var, show="*", width=30)
+    entry.pack(fill="x")
     entry.focus_set()
 
     def submit(event=None):
@@ -52,10 +56,10 @@ def ask_password() -> Optional[str]:
     entry.bind("<Return>", submit)
     entry.bind("<Escape>", cancel)
 
-    btn_frame = tk.Frame(frame)
-    btn_frame.pack(pady=(12, 0))
-    tk.Button(btn_frame, text="OK", width=10, command=submit).pack(side="left", padx=4)
-    tk.Button(btn_frame, text="Cancel", width=10, command=cancel).pack(side="left", padx=4)
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(fill="x", pady=(16, 0))
+    ttk.Button(btn_frame, text="OK", width=10, command=submit, style="Accent.TButton").pack(side="right", padx=(8, 0))
+    ttk.Button(btn_frame, text="Cancel", width=10, command=cancel).pack(side="right")
 
     root.update_idletasks()
     # Center on screen

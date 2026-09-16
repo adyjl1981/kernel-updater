@@ -51,19 +51,62 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(gui.latest_stable_version(), "6.10.1")
 
     def test_grub_submenu_paths_and_saved_default(self):
-        config = '''set default="${saved_entry}"
+        config = '''load_env
+set default="${saved_entry}"
 submenu 'Advanced options for Debian' {
  menuentry 'Debian, with Linux 6.12.4-custom' {
+  linux /boot/vmlinuz-6.12.4-custom root=/dev/test ro
  }
  menuentry 'Debian, with Linux 6.12.4-custom (recovery mode)' {
  }
 }
 '''
-        with mock.patch.object(gui, "read_grub_config", return_value=config), mock.patch.object(gui.shutil, "which", side_effect=lambda x: x), mock.patch.object(gui, "run_command") as run:
+        grub_cfg = Path("/boot/grub/grub.cfg")
+        outputs = [result(), result(), result("saved_entry=Advanced options for Debian>Debian, with Linux 6.12.4-custom\n")]
+        with mock.patch.object(gui, "grub_config_path", return_value=grub_cfg), \
+             mock.patch.object(gui, "read_grub_config", return_value=config), \
+             mock.patch.object(gui.Path, "is_file", return_value=True), \
+             mock.patch.object(gui.Path, "is_dir", return_value=True), \
+             mock.patch.object(gui.shutil, "which", side_effect=lambda x: x), \
+             mock.patch.object(gui, "run_command", side_effect=outputs) as run:
             gui.set_default_boot("6.12.4-custom", {}, lambda text: None, False)
-            run.assert_called_once()
-            self.assertEqual(run.call_args.args[0][-1], "Advanced options for Debian>Debian, with Linux 6.12.4-custom")
-            self.assertNotIn("update-grub", run.call_args.args[0])
+            self.assertEqual(run.call_count, 3)
+            write = run.call_args_list[1].args[0]
+            self.assertEqual(write, ["sudo", "-A", "grub-set-default", "--boot-directory=/boot", "Advanced options for Debian>Debian, with Linux 6.12.4-custom"])
+            self.assertFalse(any("update-grub" in call.args[0] for call in run.call_args_list))
+
+    def test_grub_default_refuses_wrong_image_before_write(self):
+        config = '''load_env
+set default="${saved_entry}"
+menuentry 'Linux 6.1-custom' {
+ linux /boot/vmlinuz-6.2-other root=/dev/test ro
+}
+'''
+        with mock.patch.object(gui, "grub_config_path", return_value=Path("/boot/grub/grub.cfg")), \
+             mock.patch.object(gui, "read_grub_config", return_value=config), \
+             mock.patch.object(gui.Path, "is_file", return_value=True), \
+             mock.patch.object(gui.Path, "is_dir", return_value=True), \
+             mock.patch.object(gui, "run_command") as run:
+            with self.assertRaisesRegex(RuntimeError, "does not unambiguously load"):
+                gui.set_default_boot("6.1-custom", {}, lambda text: None, False)
+            run.assert_not_called()
+
+    def test_grub_default_refuses_pending_once_override_before_write(self):
+        config = '''load_env
+set default="${saved_entry}"
+menuentry 'Linux 6.1-custom' {
+ linux /boot/vmlinuz-6.1-custom root=/dev/test ro
+}
+'''
+        with mock.patch.object(gui, "grub_config_path", return_value=Path("/boot/grub/grub.cfg")), \
+             mock.patch.object(gui, "read_grub_config", return_value=config), \
+             mock.patch.object(gui.Path, "is_file", return_value=True), \
+             mock.patch.object(gui.Path, "is_dir", return_value=True), \
+             mock.patch.object(gui.shutil, "which", side_effect=lambda x: x), \
+             mock.patch.object(gui, "run_command", return_value=result("next_entry=old choice\n")) as run:
+            with self.assertRaisesRegex(RuntimeError, "already pending"):
+                gui.set_default_boot("6.1-custom", {}, lambda text: None, False)
+            self.assertEqual(run.call_count, 1)
 
     def test_grub_default_refuses_unsaved_configuration(self):
         config = "menuentry 'Linux 6.1-custom' {\n}\nset default=0\n"
@@ -737,6 +780,7 @@ class AdditionalRegressionTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(gui.tk, "StringVar", Variable))
             stack.enter_context(mock.patch.object(gui.tk, "BooleanVar", Variable))
             stack.enter_context(mock.patch.object(gui, "load_presets", return_value={}))
+            stack.enter_context(mock.patch.object(gui, "apply_theme"))
             stack.enter_context(mock.patch.object(gui.KernelManagerApp, "_read_async"))
             app = gui.KernelManagerApp(Widget())
             for name in ("tree", "install_btn", "maint_tree", "logs_tree", "mok_version_combo", "sysinfo_text"):

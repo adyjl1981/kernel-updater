@@ -39,6 +39,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from pathlib import Path
 
+from ubuntu_theme import apply_theme, scrolled_text, scrolled_tree
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
 INSTALL_SCRIPT = SCRIPT_DIR / "install-custom-kernel.sh"
@@ -166,27 +168,36 @@ def run_command(cmd, env=None, log_fn=lambda text: None):
     return proc
 
 
-def read_grub_config(env=None):
+def grub_config_path():
     for name in ("/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"):
         path = Path(name)
-        if not path.exists():
-            continue
-        try:
-            return path.read_text()
-        except PermissionError:
-            return run_command(["sudo", "-A", "cat", name], env or gui_env()).stdout
+        if path.is_file():
+            return path
     raise RuntimeError("No supported GRUB configuration was found.")
 
 
-def parse_grub_entries(text):
+def read_grub_config(env=None, path=None):
+    path = grub_config_path() if path is None else path
+    try:
+        return path.read_text()
+    except PermissionError:
+        return run_command(["sudo", "-A", "cat", str(path)], env or gui_env()).stdout
+
+
+def parse_grub_entries(text, with_images=False):
     """Read title paths from generated GRUB menu/submenu blocks."""
-    entries, stack = [], []
+    entries, stack, images = [], [], {}
     for line in text.splitlines():
         line = line.strip()
         if line == "}":
             if stack:
                 stack.pop()
             continue
+        if re.match(r"^linux(?:efi|16)?\s", line) and stack and stack[-1][0] == "menuentry":
+            words = shlex.split(line, comments=True)
+            if len(words) > 1:
+                entry = ">".join(name for _, name in stack)
+                images.setdefault(entry, []).append(words[1])
         if not re.match(r"^(menuentry|submenu)\s", line):
             continue
         words = shlex.split(line, comments=True)
@@ -198,7 +209,7 @@ def parse_grub_entries(text):
         stack.append((kind, title))
     if stack:
         raise RuntimeError("Unbalanced GRUB menu blocks; select the boot entry manually.")
-    return entries
+    return [(entry, images.get(entry, [])) for entry in entries] if with_images else entries
 
 
 def grub_menu_titles(env=None):
@@ -412,31 +423,61 @@ def delete_kernel(kernel: KernelInfo, env: dict, log_fn):
     run_command(["sudo", "-A", *grub_cmd], env, log_fn)
 
 
-def grub_entry_title(version, env=None):
+def grub_entry_title(version, env=None, config=None):
     validate_release(version)
-    titles, error = grub_menu_titles(env)
+    titles, error = grub_menu_titles(env) if config is None else (parse_grub_entries(config), None)
     if error:
         raise RuntimeError(error)
     pattern = re.compile(r"(?<![\w.+-])" + re.escape(version) + r"(?![\w.+-])")
-    matches = [title for title in titles if pattern.search(title) and "recovery" not in title.lower()]
+    matches = [title for title in titles if pattern.search(title.rsplit(">", 1)[-1]) and "recovery" not in title.lower()]
     if len(matches) != 1:
         raise RuntimeError("Could not identify one unambiguous GRUB entry; select it manually.")
     return matches[0]
 
 
 def set_default_boot(version: str, env: dict, log_fn, once: bool):
-    entry = grub_entry_title(version, env)
-    config = read_grub_config(env)
+    """Change only GRUB's environment block, never kernel files or grub.cfg."""
+    validate_release(version)
+    config_path = grub_config_path()
+    config = read_grub_config(env, path=config_path)
+    if re.search(r"^\s*blscfg\b", config, re.M):
+        raise RuntimeError("BLS boot entries are unsupported here; use the distribution's boot tools.")
+    entry = grub_entry_title(version, env, config=config)
     if once:
         if "next_entry" not in config or "save_env next_entry" not in config:
             raise RuntimeError("This GRUB configuration does not support a one-time saved entry.")
     elif not re.search(r'^\s*set default=[\"\']?\$\{saved_entry\}[\"\']?\s*$', config, re.M):
-        raise RuntimeError("Set GRUB_DEFAULT=saved and regenerate GRUB configuration before using this button.")
-    names = ("grub-reboot", "grub2-reboot") if once else ("grub-set-default", "grub2-set-default")
-    command = next((name for name in names if shutil.which(name)), None)
-    if not command:
-        raise RuntimeError("GRUB boot-selection command is not installed.")
-    run_command(["sudo", "-A", command, entry], env, log_fn)
+        raise RuntimeError("Set GRUB_DEFAULT=saved in /etc/default/grub and run update-grub before using this button. No boot setting was changed.")
+
+    # Confirm the selected list entry still exists and its menu actually loads
+    # that image. A matching title alone can refer to a stale/custom entry.
+    if not Path(f"/boot/vmlinuz-{version}").is_file() or not Path(f"/lib/modules/{version}").is_dir():
+        raise RuntimeError("The selected kernel is no longer fully installed. Refresh the kernel list; no boot setting was changed.")
+    images = dict(parse_grub_entries(config, with_images=True)).get(entry, [])
+    if len(images) != 1 or Path(images[0]).name != f"vmlinuz-{version}" or "$" in images[0]:
+        raise RuntimeError("The selected GRUB entry does not unambiguously load this kernel. No boot setting was changed.")
+    if not re.search(r"^\s*load_env\s*$", config, re.M) or re.search(r"^\s*(?:load_env|save_env)\s+-f\b", config, re.M):
+        raise RuntimeError("This GRUB configuration does not use the standard environment block. No boot setting was changed.")
+    # Pair the tools with the configuration that was read, not whichever
+    # unrelated GRUB executable happens to occur first on PATH.
+    prefix = "grub2" if config_path.parent.name == "grub2" else "grub"
+    command = f"{prefix}-{'reboot' if once else 'set-default'}"
+    editor = f"{prefix}-editenv"
+    if not shutil.which(command) or not shutil.which(editor):
+        raise RuntimeError("GRUB boot-selection/verification commands are not installed.")
+    env_file = config_path.parent / "grubenv"
+    read_env = ["sudo", "-A", editor, str(env_file), "list"]
+    before = run_command(read_env, env, log_fn).stdout  # Invalid/missing grubenv must fail before a write.
+    before_values = dict(line.split("=", 1) for line in before.splitlines() if "=" in line)
+    if not once and (before_values.get("next_entry") or before_values.get("prev_saved_entry")):
+        raise RuntimeError("A one-time GRUB boot override is already pending. Reboot or clear it before changing the persistent default; no boot setting was changed.")
+    run_command(["sudo", "-A", command, f"--boot-directory={config_path.parent.parent}", entry], env, log_fn)
+    saved = run_command(read_env, env, log_fn).stdout
+    values = dict(line.split("=", 1) for line in saved.splitlines() if "=" in line)
+    key = "next_entry" if once else "saved_entry"
+    if values.get(key) != entry:
+        raise RuntimeError("GRUB did not retain the requested boot selection. Check grubenv before rebooting.")
+    log_fn(f"{'Next boot' if once else 'Default boot kernel'} set to {version} (verified).\n")
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +638,9 @@ class KernelManagerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Kernel Manager")
-        root.geometry("880x640")
+        apply_theme(root)
+        root.geometry("960x700")
+        root.minsize(820, 600)
 
         self.build_proc = None
         self.build_thread = None
@@ -615,14 +658,15 @@ class KernelManagerApp:
         self.presets = load_presets()
 
         nb = ttk.Notebook(root)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        nb.pack(fill="both", expand=True, padx=12, pady=12)
+        nb.enable_traversal()
 
-        self.installed_tab = ttk.Frame(nb)
-        self.build_tab = ttk.Frame(nb)
-        self.logs_tab = ttk.Frame(nb)
-        self.maintenance_tab = ttk.Frame(nb)
-        self.sysinfo_tab = ttk.Frame(nb)
-        self.mok_tab = ttk.Frame(nb)
+        self.installed_tab = ttk.Frame(nb, padding=12)
+        self.build_tab = ttk.Frame(nb, padding=12)
+        self.logs_tab = ttk.Frame(nb, padding=12)
+        self.maintenance_tab = ttk.Frame(nb, padding=12)
+        self.sysinfo_tab = ttk.Frame(nb, padding=12)
+        self.mok_tab = ttk.Frame(nb, padding=12)
         nb.add(self.installed_tab, text="Installed Kernels")
         nb.add(self.build_tab, text="Build New Kernel")
         nb.add(self.logs_tab, text="Build Logs")
@@ -706,8 +750,10 @@ class KernelManagerApp:
             try:
                 work(log_win.append)
                 log_win.append("\nDone.\n")
+                self._dispatch(lambda: log_win.finish(True))
             except Exception as e:
                 log_win.append(f"\n[error] {e}\n")
+                self._dispatch(lambda: log_win.finish(False))
             finally:
                 self._dispatch(self._finish_operation)
         threading.Thread(target=worker, daemon=True).start()
@@ -741,11 +787,11 @@ class KernelManagerApp:
         ttk.Button(toolbar2, text="Show actual GRUB entries",
                    command=self.on_show_grub_entries).pack(side="left")
 
-        self.update_label = ttk.Label(frame, text="")
+        self.update_label = ttk.Label(frame, text="", style="Status.TLabel")
         self.update_label.pack(fill="x", pady=(0, 6))
 
         columns = ("version", "type", "running", "size")
-        self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
+        tree_frame, self.tree = scrolled_tree(frame, columns=columns, show="headings", height=14)
         for col, label, width in [
             ("version", "Version", 220),
             ("type", "Source", 140),
@@ -754,7 +800,7 @@ class KernelManagerApp:
         ]:
             self.tree.heading(col, text=label)
             self.tree.column(col, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True)
+        tree_frame.pack(fill="both", expand=True)
 
     def refresh_installed(self):
         def done(kernels):
@@ -831,10 +877,13 @@ class KernelManagerApp:
             win.title("Actual GRUB menu entries")
             win.geometry("560x300")
             ttk.Label(win, text="Menu paths found in grub.cfg:").pack(anchor="w", padx=8, pady=8)
-            listbox = tk.Listbox(win)
-            listbox.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+            win.transient(self.root)
+            panel, entries = scrolled_tree(win, columns=("entry",), show="headings", selectmode="browse")
+            entries.heading("entry", text="Boot menu entry")
+            entries.column("entry", width=620, minwidth=300, stretch=True)
+            panel.pack(fill="both", expand=True, padx=12, pady=(0, 12))
             for title in titles or [error or "No entries found."]:
-                listbox.insert("end", title)
+                entries.insert("", "end", values=(title,))
         self._read_async("GRUB entries", lambda: grub_menu_titles(gui_env()), done)
 
     # ---------------- Build tab ----------------
@@ -877,27 +926,21 @@ class KernelManagerApp:
         # it turns into an OOM kill.
         monitor = ttk.LabelFrame(frame, text="System resources (live)")
         monitor.pack(fill="x", padx=4, pady=(0, 4))
-        self.resource_label = ttk.Label(monitor, text="Reading...", font=("Monospace", 9))
+        self.resource_label = ttk.Label(monitor, text="Reading...", font="TkFixedFont")
         self.resource_label.pack(anchor="w", padx=8, pady=6)
 
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill="x", pady=6)
-        self.start_btn = ttk.Button(btn_frame, text="Start Build", command=self.start_build)
+        self.start_btn = ttk.Button(btn_frame, text="Start Build", command=self.start_build, style="Accent.TButton")
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self.stop_build, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
-        self.install_btn = ttk.Button(btn_frame, text="Install Now", command=self.start_install, state="disabled")
+        self.install_btn = ttk.Button(btn_frame, text="Install Now", command=self.start_install, state="disabled", style="Accent.TButton")
         self.install_btn.pack(side="left", padx=6)
 
         ttk.Label(frame, text="Live build output:").pack(anchor="w", padx=4)
-        log_frame = ttk.Frame(frame)
+        log_frame, self.log_text = scrolled_text(frame, wrap="none", height=20)
         log_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-        self.log_text = tk.Text(log_frame, wrap="none", height=20, bg="black", fg="#33ff33",
-                                 insertbackground="#33ff33", font=("Monospace", 9))
-        yscroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=yscroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        yscroll.pack(side="right", fill="y")
 
     def _sync_lto_state(self):
         if self.toolchain_var.get() == "clang":
@@ -1087,11 +1130,11 @@ class KernelManagerApp:
         ttk.Button(toolbar, text="Delete Selected", command=self.on_delete_log).pack(side="left")
 
         columns = ("name", "date", "size")
-        self.logs_tree = ttk.Treeview(frame, columns=columns, show="headings", height=16)
+        tree_frame, self.logs_tree = scrolled_tree(frame, columns=columns, show="headings", height=16)
         for col, label, width in [("name", "Log file", 320), ("date", "Date", 180), ("size", "Size", 100)]:
             self.logs_tree.heading(col, text=label)
             self.logs_tree.column(col, width=width, anchor="w")
-        self.logs_tree.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        tree_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
         self.refresh_logs_tab()
 
     def refresh_logs_tab(self):
@@ -1112,11 +1155,9 @@ class KernelManagerApp:
         win = tk.Toplevel(self.root)
         win.title(path.name)
         win.geometry("800x600")
-        text = tk.Text(win, wrap="none", bg="black", fg="#33ff33", font=("Monospace", 9))
-        scroll = ttk.Scrollbar(win, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
-        text.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        win.transient(self.root)
+        panel, text = scrolled_text(win, wrap="none")
+        panel.pack(fill="both", expand=True, padx=12, pady=12)
         try:
             with path.open("rb") as source:
                 source.seek(0, os.SEEK_END)
@@ -1152,7 +1193,7 @@ class KernelManagerApp:
 
         info = ttk.Frame(frame)
         info.pack(fill="x", padx=4, pady=6)
-        self.disk_usage_label = ttk.Label(info, text="")
+        self.disk_usage_label = ttk.Label(info, text="", style="Status.TLabel")
         self.disk_usage_label.pack(anchor="w")
 
         toolbar = ttk.Frame(frame)
@@ -1167,12 +1208,12 @@ class KernelManagerApp:
                   ).pack(anchor="w", padx=4)
 
         columns = ("dir", "size")
-        self.maint_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
+        tree_frame, self.maint_tree = scrolled_tree(frame, columns=columns, show="headings", height=14)
         self.maint_tree.heading("dir", text="Directory")
         self.maint_tree.heading("size", text="Size")
         self.maint_tree.column("dir", width=500, anchor="w")
         self.maint_tree.column("size", width=100, anchor="w")
-        self.maint_tree.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        tree_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
         self.refresh_maintenance_tab()
 
@@ -1223,8 +1264,8 @@ class KernelManagerApp:
     def _build_sysinfo_tab(self):
         frame = self.sysinfo_tab
         ttk.Button(frame, text="Refresh", command=self.refresh_sysinfo_tab).pack(anchor="w", padx=4, pady=6)
-        self.sysinfo_text = tk.Text(frame, wrap="word", height=20, font=("Monospace", 10))
-        self.sysinfo_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        panel, self.sysinfo_text = scrolled_text(frame, wrap="word", height=20)
+        panel.pack(fill="both", expand=True, padx=4, pady=(0, 4))
         self.sysinfo_text.configure(state="disabled")
         self.refresh_sysinfo_tab()
 
@@ -1361,13 +1402,20 @@ class LogWindow:
     def __init__(self, parent, title):
         self.win = tk.Toplevel(parent)
         self.win.title(title)
-        self.win.geometry("600x300")
-        self.text = tk.Text(self.win, bg="black", fg="#33ff33", font=("Monospace", 9))
-        self.text.pack(fill="both", expand=True)
+        self.win.geometry("680x380")
+        self.win.transient(parent)
+        self.status_label = ttk.Label(self.win, text="Working…", style="Status.TLabel")
+        self.status_label.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        panel, self.text = scrolled_text(self.win, wrap="none")
+        panel.pack(fill="both", expand=True, padx=12, pady=(12, 6))
         self.queue = queue.Queue(maxsize=2000)
         self.closed = False
         self.win.protocol("WM_DELETE_WINDOW", self._close)
         self.win.after(100, self._poll)
+
+    def finish(self, success):
+        if not self.closed:
+            self.status_label.configure(text="Completed" if success else "Failed — see details above")
 
     def _close(self):
         self.closed = True
