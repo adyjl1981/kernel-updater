@@ -108,12 +108,87 @@ menuentry 'Linux 6.1-custom' {
                 gui.set_default_boot("6.1-custom", {}, lambda text: None, False)
             self.assertEqual(run.call_count, 1)
 
-    def test_grub_default_refuses_unsaved_configuration(self):
-        config = "menuentry 'Linux 6.1-custom' {\n}\nset default=0\n"
-        with mock.patch.object(gui, "read_grub_config", return_value=config), mock.patch.object(gui, "run_command") as run:
-            with self.assertRaisesRegex(RuntimeError, "GRUB_DEFAULT=saved"):
-                gui.set_default_boot("6.1-custom", {}, lambda text: None, False)
-            run.assert_not_called()
+    def test_grub_default_zero_is_safely_enabled_and_selected(self):
+        initial = '''load_env
+set default=0
+submenu 'Advanced options for Ubuntu' {
+ menuentry 'Ubuntu, with Linux 7.2.0-custom' {
+  linux /boot/vmlinuz-7.2.0-custom root=/dev/test ro
+ }
+}
+'''
+        generated = initial.replace("set default=0", 'set default="${saved_entry}"')
+        defaults_before = "GRUB_DEFAULT=0\nGRUB_TIMEOUT_STYLE=hidden\nGRUB_TIMEOUT=0\n"
+        defaults_after = defaults_before.replace("GRUB_DEFAULT=0", "GRUB_DEFAULT=saved")
+        entry = "Advanced options for Ubuntu>Ubuntu, with Linux 7.2.0-custom"
+
+        def command_result(command, *args, **kwargs):
+            if command[-1] == "list":
+                command_result.reads += 1
+                value = "Advanced options for Ubuntu>Ubuntu, with Linux 7.0.0-30-generic" if command_result.reads == 1 else entry
+                return result(f"saved_entry={value}\n")
+            return result()
+        command_result.reads = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            defaults = Path(tmp) / "grub"
+            defaults.write_text(defaults_before)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(gui, "GRUB_DEFAULTS_FILE", defaults))
+                stack.enter_context(mock.patch.object(gui, "grub_config_path", return_value=Path("/boot/grub/grub.cfg")))
+                stack.enter_context(mock.patch.object(gui, "grub_update_command", return_value=["update-grub"]))
+                stack.enter_context(mock.patch.object(gui, "read_grub_config", side_effect=[initial, generated, generated]))
+                stack.enter_context(mock.patch.object(gui, "read_system_file", side_effect=[defaults_before, defaults_after]))
+                stack.enter_context(mock.patch.object(gui.Path, "is_file", return_value=True))
+                stack.enter_context(mock.patch.object(gui.Path, "is_dir", return_value=True))
+                stack.enter_context(mock.patch.object(gui.Path, "is_symlink", return_value=False))
+                stack.enter_context(mock.patch.object(gui.Path, "exists", return_value=False))
+                stack.enter_context(mock.patch.object(gui.shutil, "which", side_effect=lambda name: name))
+                run = stack.enter_context(mock.patch.object(gui, "run_command", side_effect=command_result))
+                gui.set_default_boot("7.2.0-custom", {}, lambda text: None, False)
+
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertTrue(any(command[2:4] == ["cp", "--preserve=all"] for command in commands))
+            self.assertTrue(any(command[2] == "install" and command[-1] == defaults for command in commands))
+            self.assertIn(["sudo", "-A", "update-grub"], commands)
+            self.assertIn(["sudo", "-A", "grub-set-default", "--boot-directory=/boot", entry], commands)
+            self.assertLess(commands.index(["sudo", "-A", "update-grub"]),
+                            commands.index(["sudo", "-A", "grub-set-default", "--boot-directory=/boot", entry]))
+
+    def test_saved_default_edit_preserves_unrelated_settings(self):
+        before = "# keep this\nGRUB_DEFAULT=0\nGRUB_TIMEOUT_STYLE=hidden\nGRUB_TIMEOUT=0\n"
+        self.assertEqual(gui.saved_default_config(before),
+                         "# keep this\nGRUB_DEFAULT=saved\nGRUB_TIMEOUT_STYLE=hidden\nGRUB_TIMEOUT=0\n")
+        with self.assertRaisesRegex(RuntimeError, "Multiple active"):
+            gui.saved_default_config("GRUB_DEFAULT=0\nexport GRUB_DEFAULT=saved\n")
+
+    def test_saved_default_regeneration_failure_restores_backup(self):
+        before = "GRUB_DEFAULT=0\nGRUB_TIMEOUT=0\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            defaults = Path(tmp) / "grub"
+            defaults.write_text(before)
+            update_calls = 0
+
+            def command_result(command, *args, **kwargs):
+                nonlocal update_calls
+                if command[-1] == "update-grub":
+                    update_calls += 1
+                    if update_calls == 1:
+                        raise RuntimeError("mock regeneration failure")
+                return result()
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(gui, "GRUB_DEFAULTS_FILE", defaults))
+                stack.enter_context(mock.patch.object(gui, "grub_update_command", return_value=["update-grub"]))
+                stack.enter_context(mock.patch.object(gui, "read_system_file", return_value=before))
+                stack.enter_context(mock.patch.object(gui.Path, "exists", return_value=False))
+                run = stack.enter_context(mock.patch.object(gui, "run_command", side_effect=command_result))
+                with self.assertRaisesRegex(RuntimeError, "original configuration was restored"):
+                    gui.enable_saved_grub_default({}, lambda text: None, Path("/boot/grub/grub.cfg"))
+
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(sum(command[-1] == "update-grub" for command in commands), 2)
+            self.assertEqual(sum(command[2] == "cp" for command in commands), 2)
 
     def test_grub_refuses_ambiguous_or_missing_entries(self):
         for config in ("blscfg\n", "menuentry 'Linux 6.1-custom' {\n}\nmenuentry 'Other 6.1-custom' {\n}\n"):

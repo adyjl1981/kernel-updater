@@ -51,6 +51,7 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") 
 LEGACY_MOK_DIR = SCRIPT_DIR / "mok"
 MOK_DIR = LEGACY_MOK_DIR if any(LEGACY_MOK_DIR.glob("MOK.*")) else CONFIG_DIR / "mok"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+GRUB_DEFAULTS_FILE = Path("/etc/default/grub")
 
 VER_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
 
@@ -228,6 +229,83 @@ def grub_update_command():
                 if shutil.which(command):
                     return [command] if command == "update-grub" else [command, "-o", cfg]
     raise RuntimeError("No supported GRUB update command/configuration. Manage this kernel manually.")
+
+
+def read_system_file(path: Path, env: dict):
+    try:
+        return path.read_text()
+    except PermissionError:
+        return run_command(["sudo", "-A", "cat", path], env).stdout
+
+
+def saved_default_config(text: str):
+    """Return /etc/default/grub with only its effective GRUB_DEFAULT changed."""
+    lines = text.splitlines(keepends=True)
+    assignments = [i for i, line in enumerate(lines)
+                   if re.match(r"^\s*(?:export\s+)?GRUB_DEFAULT\s*=", line)]
+    if len(assignments) > 1:
+        raise RuntimeError("Multiple active GRUB_DEFAULT settings were found; no boot setting was changed.")
+    replacement = "GRUB_DEFAULT=saved"
+    if assignments:
+        ending = "\n" if lines[assignments[0]].endswith("\n") else ""
+        lines[assignments[0]] = replacement + ending
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(replacement + "\n")
+    return "".join(lines)
+
+
+def enable_saved_grub_default(env: dict, log_fn, config_path: Path):
+    """Enable GRUB's saved default, restoring both files if regeneration fails."""
+    defaults = GRUB_DEFAULTS_FILE
+    if not defaults.is_file() or defaults.is_symlink():
+        raise RuntimeError(f"{defaults} is not a regular configuration file; no boot setting was changed.")
+    original = read_system_file(defaults, env)
+    updated = saved_default_config(original)
+    update_command = grub_update_command()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = defaults.with_name(f"{defaults.name}.kernel-manager-backup-{stamp}-{os.getpid()}")
+    if backup.exists():
+        raise RuntimeError(f"Refusing to replace existing backup {backup}; no boot setting was changed.")
+
+    temporary = None
+    changed = updated != original
+    backup_created = False
+    try:
+        if changed:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="kernel-manager-grub-",
+                                             delete=False) as staged:
+                staged.write(updated)
+                temporary = Path(staged.name)
+            temporary.chmod(0o644)
+            run_command(["sudo", "-A", "cp", "--preserve=all", "--", defaults, backup], env, log_fn)
+            backup_created = True
+            run_command(["sudo", "-A", "install", "-o", "root", "-g", "root", "-m", "0644",
+                         "--", temporary, defaults], env, log_fn)
+        run_command(["sudo", "-A", *update_command], env, log_fn)
+        verified_defaults = read_system_file(defaults, env)
+        generated = read_grub_config(env, path=config_path)
+        if saved_default_config(verified_defaults) != verified_defaults or not re.search(
+                r'^\s*set default=["\']?\$\{saved_entry\}["\']?\s*$', generated, re.M):
+            raise RuntimeError("GRUB regeneration did not enable the saved default.")
+    except Exception as error:
+        if changed and backup_created:
+            try:
+                run_command(["sudo", "-A", "cp", "--preserve=all", "--", backup, defaults], env, log_fn)
+                run_command(["sudo", "-A", *update_command], env, log_fn)
+            except Exception as rollback_error:
+                raise RuntimeError(f"Failed to enable GRUB saved defaults ({error}); rollback also failed ({rollback_error}). Inspect {defaults}, {backup}, and {config_path} before rebooting.") from error
+            raise RuntimeError(f"Failed to enable GRUB saved defaults ({error}). The original configuration was restored from {backup}.") from error
+        if changed:
+            raise RuntimeError(f"Failed to back up {defaults} ({error}); no boot setting was changed.") from error
+        raise RuntimeError(f"Failed to regenerate GRUB with its saved-default setting ({error}).") from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    if changed:
+        log_fn(f"Enabled GRUB_DEFAULT=saved; backup retained at {backup}.\n")
+    return read_grub_config(env, path=config_path)
 
 
 def validate_release(version):
@@ -436,21 +514,15 @@ def grub_entry_title(version, env=None, config=None):
 
 
 def set_default_boot(version: str, env: dict, log_fn, once: bool):
-    """Change only GRUB's environment block, never kernel files or grub.cfg."""
+    """Select a verified GRUB entry, enabling saved defaults when required."""
     validate_release(version)
     config_path = grub_config_path()
     config = read_grub_config(env, path=config_path)
     if re.search(r"^\s*blscfg\b", config, re.M):
         raise RuntimeError("BLS boot entries are unsupported here; use the distribution's boot tools.")
     entry = grub_entry_title(version, env, config=config)
-    if once:
-        if "next_entry" not in config or "save_env next_entry" not in config:
-            raise RuntimeError("This GRUB configuration does not support a one-time saved entry.")
-    elif not re.search(r'^\s*set default=[\"\']?\$\{saved_entry\}[\"\']?\s*$', config, re.M):
-        raise RuntimeError("Set GRUB_DEFAULT=saved in /etc/default/grub and run update-grub before using this button. No boot setting was changed.")
-
-    # Confirm the selected list entry still exists and its menu actually loads
-    # that image. A matching title alone can refer to a stale/custom entry.
+    if once and ("next_entry" not in config or "save_env next_entry" not in config):
+        raise RuntimeError("This GRUB configuration does not support a one-time saved entry.")
     if not Path(f"/boot/vmlinuz-{version}").is_file() or not Path(f"/lib/modules/{version}").is_dir():
         raise RuntimeError("The selected kernel is no longer fully installed. Refresh the kernel list; no boot setting was changed.")
     images = dict(parse_grub_entries(config, with_images=True)).get(entry, [])
@@ -458,8 +530,9 @@ def set_default_boot(version: str, env: dict, log_fn, once: bool):
         raise RuntimeError("The selected GRUB entry does not unambiguously load this kernel. No boot setting was changed.")
     if not re.search(r"^\s*load_env\s*$", config, re.M) or re.search(r"^\s*(?:load_env|save_env)\s+-f\b", config, re.M):
         raise RuntimeError("This GRUB configuration does not use the standard environment block. No boot setting was changed.")
-    # Pair the tools with the configuration that was read, not whichever
-    # unrelated GRUB executable happens to occur first on PATH.
+    # Validate the matching GRUB tools and environment block before changing
+    # /etc/default/grub, so an unavailable tool or pending override cannot
+    # leave a needless partial configuration change.
     prefix = "grub2" if config_path.parent.name == "grub2" else "grub"
     command = f"{prefix}-{'reboot' if once else 'set-default'}"
     editor = f"{prefix}-editenv"
@@ -467,10 +540,19 @@ def set_default_boot(version: str, env: dict, log_fn, once: bool):
         raise RuntimeError("GRUB boot-selection/verification commands are not installed.")
     env_file = config_path.parent / "grubenv"
     read_env = ["sudo", "-A", editor, str(env_file), "list"]
-    before = run_command(read_env, env, log_fn).stdout  # Invalid/missing grubenv must fail before a write.
+    before = run_command(read_env, env, log_fn).stdout
     before_values = dict(line.split("=", 1) for line in before.splitlines() if "=" in line)
     if not once and (before_values.get("next_entry") or before_values.get("prev_saved_entry")):
         raise RuntimeError("A one-time GRUB boot override is already pending. Reboot or clear it before changing the persistent default; no boot setting was changed.")
+    if not once and not re.search(r'^\s*set default=[\"\']?\$\{saved_entry\}[\"\']?\s*$', config, re.M):
+        config = enable_saved_grub_default(env, log_fn, config_path)
+    entry = grub_entry_title(version, env, config=config)
+
+    # Confirm the selected list entry still exists and its menu actually loads
+    # that image. A matching title alone can refer to a stale/custom entry.
+    images = dict(parse_grub_entries(config, with_images=True)).get(entry, [])
+    if len(images) != 1 or Path(images[0]).name != f"vmlinuz-{version}" or "$" in images[0]:
+        raise RuntimeError("The selected GRUB entry does not unambiguously load this kernel. No boot setting was changed.")
     run_command(["sudo", "-A", command, f"--boot-directory={config_path.parent.parent}", entry], env, log_fn)
     saved = run_command(read_env, env, log_fn).stdout
     values = dict(line.split("=", 1) for line in saved.splitlines() if "=" in line)
