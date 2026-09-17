@@ -150,33 +150,15 @@ if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -
   warn "You'll need to either disable Secure Boot, or sign the kernel/modules yourself (MOK enrollment) after the build."
 fi
 
-### ---------- 3. Install build dependencies ---------------------------------
-log "Installing build dependencies via $PKG"
-
-case "$PKG" in
-  apt)
-    run_sudo apt update
-    run_sudo apt install -y \
-      build-essential libncurses-dev bison flex libssl-dev libelf-dev \
-      bc dwarves git fakeroot rsync cpio kmod ccache curl \
-      libudev-dev pahole zstd libdw-dev gawk python3 gnupg xz-utils
-    $USE_CLANG && run_sudo apt install -y clang lld llvm
-    ;;
-  dnf)
-    run_sudo dnf install -y \
-      gcc gcc-c++ make perl ncurses-devel bison flex openssl-devel elfutils-libelf-devel \
-      bc dwarves git fakeroot rsync cpio kmod ccache curl \
-      zstd elfutils-devel gawk python3 gnupg2 xz
-    $USE_CLANG && run_sudo dnf install -y clang lld llvm
-    ;;
-  pacman)
-    run_sudo pacman -S --needed --noconfirm \
-      base-devel ncurses bison flex openssl libelf \
-      bc dwarves git fakeroot rsync cpio kmod ccache curl \
-      zstd elfutils gawk python gnupg xz
-    $USE_CLANG && run_sudo pacman -S --needed --noconfirm clang lld llvm
-    ;;
-esac
+### ---------- 3. Verify build dependencies ----------------------------------
+log "Verifying build dependencies (installation requires explicit approval in Kernel Manager)"
+REQUIRED_TOOLS=(gcc g++ make perl bison flex bc git fakeroot rsync cpio depmod ccache curl pahole zstd gawk python3 gpg xz tar tee flock grep awk find df nproc dirname)
+$USE_CLANG && REQUIRED_TOOLS+=(clang ld.lld llvm-ar)
+MISSING_TOOLS=()
+for tool in "${REQUIRED_TOOLS[@]}"; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING_TOOLS+=("$tool")
+done
+(( ${#MISSING_TOOLS[@]} == 0 )) || err "Missing build tools: ${MISSING_TOOLS[*]}. Use Tools > Check Dependencies in Kernel Manager, or install them with your distribution package manager."
 
 # From here onward there are no privileged package operations to interrupt.
 echo "KERNEL_MANAGER_CANCELLABLE=1"

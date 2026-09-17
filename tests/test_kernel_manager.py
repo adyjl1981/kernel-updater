@@ -298,6 +298,7 @@ class GuiStateTests(unittest.TestCase):
         app.start_btn, app.stop_btn, app.install_btn = mock.Mock(), mock.Mock(), mock.Mock()
         app.log_text = mock.Mock()
         app._append_log = mock.Mock()
+        app._dependencies_available = mock.Mock(return_value=True)
         app.refresh_installed = mock.Mock()
         app.refresh_maintenance_tab = mock.Mock()
         app.refresh_logs_tab = mock.Mock()
@@ -442,11 +443,11 @@ class ShellIntegrationTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         bindir = self.root / "bin"
         bindir.mkdir()
-        for name in ("bash", "python3", "awk", "cat", "grep", "flock", "mkdir", "chmod", "sha256sum", "cp", "cut", "mv", "mktemp", "df", "du", "find", "tar", "xz", "timeout", "tee", "nproc", "sort", "tail"):
+        for name in ("bash", "python3", "awk", "cat", "grep", "flock", "mkdir", "chmod", "sha256sum", "cp", "cut", "mv", "mktemp", "df", "du", "find", "tar", "xz", "timeout", "tee", "nproc", "sort", "tail", "dirname"):
             binary = shutil.which(name)
             if not binary: self.skipTest(f"Required test utility missing: {name}")
             (bindir / name).symlink_to(binary)
-        for name in ("sudo", "apt", "ccache", "uname", "curl", "gpg", "make", "installkernel", "update-initramfs", "update-grub", "depmod"):
+        for name in ("sudo", "apt", "ccache", "uname", "curl", "gpg", "make", "installkernel", "update-initramfs", "update-grub", "depmod", "gcc", "g++", "perl", "bison", "flex", "bc", "git", "fakeroot", "rsync", "cpio", "pahole", "zstd", "gawk", "clang", "ld.lld", "llvm-ar"):
             (bindir / name).write_text(COMMAND_DOUBLE)
             (bindir / name).chmod(0o755)
         self.env = dict(os.environ, PATH=str(bindir), KERNEL_TEST_HOME=str(self.root))
@@ -599,8 +600,8 @@ class ShellIntegrationTests(unittest.TestCase):
         (self.root / "bin/dnf").chmod(0o755)
         self.build()
         commands = [args for name, args in self.commands() if name == "sudo"]
-        self.assertTrue(any("gcc" in args and "make" in args for args in commands))
-        self.assertFalse(any("groupinstall" in args for args in commands))
+        self.assertEqual(commands, [])
+        self.assertNotIn("Installing build dependencies", self.run_script("build-custom-kernel.sh").stdout)
 
     def test_pacman_does_not_refresh_database_without_full_upgrade(self):
         (self.root / "bin/apt").unlink()
@@ -608,8 +609,7 @@ class ShellIntegrationTests(unittest.TestCase):
         (self.root / "bin/pacman").chmod(0o755)
         self.build()
         commands = [args for name, args in self.commands() if name == "sudo"]
-        self.assertTrue(any("pacman" in args and "-S" in args for args in commands))
-        self.assertFalse(any("-Sy" in args for args in commands))
+        self.assertEqual(commands, [])
 
     def test_arm_hardware_without_x86_fields_builds_with_portable_flags(self):
         cpu = self.root / "cpuinfo"
@@ -852,6 +852,7 @@ class AdditionalRegressionTests(unittest.TestCase):
             for name in ("Notebook", "Frame", "Button", "Label", "Treeview", "LabelFrame", "Radiobutton", "Checkbutton", "Spinbox", "Scrollbar", "Combobox"):
                 stack.enter_context(mock.patch.object(gui.ttk, name, Widget))
             stack.enter_context(mock.patch.object(gui.tk, "Text", Widget))
+            stack.enter_context(mock.patch.object(gui.tk, "Menu", Widget))
             stack.enter_context(mock.patch.object(gui.tk, "StringVar", Variable))
             stack.enter_context(mock.patch.object(gui.tk, "BooleanVar", Variable))
             stack.enter_context(mock.patch.object(gui, "load_presets", return_value={}))

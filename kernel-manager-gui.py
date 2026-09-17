@@ -40,6 +40,8 @@ from tkinter import ttk, messagebox
 from pathlib import Path
 
 from ubuntu_theme import apply_theme, scrolled_text, scrolled_tree
+from dependency_checker import (check_dependencies, initial_check_needed,
+                                install_packages, packages_to_install)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
@@ -94,8 +96,10 @@ def load_presets() -> dict:
 def save_presets(d: dict):
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        current = load_presets()
+        current.update(d)
         with tempfile.NamedTemporaryFile("w", dir=CONFIG_DIR, delete=False) as f:
-            json.dump(d, f, indent=2)
+            json.dump(current, f, indent=2)
         os.replace(f.name, CONFIG_FILE)
     except OSError as e:
         print(f"Could not save preferences: {e}", file=sys.stderr)
@@ -739,6 +743,12 @@ class KernelManagerApp:
         self._prev_cpu_times = None
         self.presets = load_presets()
 
+        menu = tk.Menu(root)
+        tools_menu = tk.Menu(menu, tearoff=False)
+        tools_menu.add_command(label="Check Dependencies…", command=self.on_check_dependencies)
+        menu.add_cascade(label="Tools", menu=tools_menu)
+        root.configure(menu=menu)
+
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=12, pady=12)
         nb.enable_traversal()
@@ -767,7 +777,68 @@ class KernelManagerApp:
         self._restore_completed_build()
         self.root.after(100, self._poll_log_queue)
         self.root.after(1000, self._update_resource_monitor)
+        if initial_check_needed(self.presets):
+            self.root.after(350, self._run_initial_dependency_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _run_initial_dependency_check(self):
+        save_presets({"dependency_check_completed": True})
+        self.presets["dependency_check_completed"] = True
+        self.on_check_dependencies(show_if_ready=False)
+
+    def on_check_dependencies(self, show_if_ready=True):
+        def done(checked):
+            manager, results = checked
+            if not any(item.missing for item in results):
+                if show_if_ready:
+                    messagebox.showinfo("Dependencies", "All required and optional dependencies are available.")
+                return
+            self._show_dependency_dialog(manager, results)
+        self._read_async("Dependency check", check_dependencies, done)
+
+    def _show_dependency_dialog(self, manager, results):
+        missing = [item for item in results if item.missing]
+        win = tk.Toplevel(self.root)
+        win.title("Kernel Manager Dependencies")
+        win.geometry("820x480")
+        win.minsize(680, 360)
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(win, text="Some Kernel Manager features need additional software.", font="TkHeadingFont").pack(anchor="w", padx=16, pady=(16, 4))
+        ttk.Label(win, text="Nothing will be installed unless you approve it. Optional items are not included in the Install Required action.", wraplength=780, justify="left").pack(anchor="w", padx=16, pady=(0, 10))
+        columns = ("status", "name", "needed", "missing")
+        panel, tree = scrolled_tree(win, columns=columns, show="headings", height=13)
+        for column, label, width in (("status", "Importance", 95), ("name", "Dependency", 180), ("needed", "Needed for", 290), ("missing", "Missing", 230)):
+            tree.heading(column, text=label)
+            tree.column(column, width=width, anchor="w", stretch=column in ("needed", "missing"))
+        panel.pack(fill="both", expand=True, padx=16)
+        for item in missing:
+            absent = ", ".join(item.missing_packages or item.missing_tools)
+            tree.insert("", "end", values=("Required" if item.dependency.required else "Optional", item.dependency.name, item.dependency.purpose, absent))
+        actions = ttk.Frame(win)
+        actions.pack(fill="x", padx=16, pady=14)
+        required_packages = packages_to_install(results, manager)
+        install = ttk.Button(actions, text="Install Required Dependencies", style="Accent.TButton", command=lambda: (win.destroy(), self._install_missing_dependencies(manager, results)))
+        install.pack(side="left")
+        if not required_packages:
+            install.configure(state="disabled")
+        ttk.Button(actions, text="Close", command=win.destroy).pack(side="right")
+
+    def _install_missing_dependencies(self, manager, results):
+        packages = packages_to_install(results, manager)
+        if not packages:
+            messagebox.showinfo("Dependencies", "There are no installable required packages for this system.")
+            return
+        if not messagebox.askyesno("Install required dependencies", f"Install {len(packages)} required package(s) using {manager}?\n\n" + ", ".join(packages)):
+            return
+        self._run_operation("Installing dependencies", lambda log: install_packages(manager, packages, gui_env(), log, run_command), lambda success: self.on_check_dependencies(show_if_ready=True))
+
+    def _dependencies_available(self, keys):
+        manager, results = check_dependencies()
+        if any(item.missing and item.dependency.key in keys for item in results):
+            self._show_dependency_dialog(manager, results)
+            return False
+        return True
 
     def _dispatch(self, callback):
         if not self.closed:
@@ -823,21 +894,25 @@ class KernelManagerApp:
         self.refresh_maintenance_tab()
         self.refresh_logs_tab()
 
-    def _run_operation(self, title, work):
+    def _run_operation(self, title, work, completed=None):
         if not self._begin_operation(title):
             return
         log_win = LogWindow(self.root, title)
 
         def worker():
+            success = False
             try:
                 work(log_win.append)
                 log_win.append("\nDone.\n")
+                success = True
                 self._dispatch(lambda: log_win.finish(True))
             except Exception as e:
                 log_win.append(f"\n[error] {e}\n")
                 self._dispatch(lambda: log_win.finish(False))
             finally:
                 self._dispatch(self._finish_operation)
+                if completed:
+                    self._dispatch(lambda: completed(success))
         threading.Thread(target=worker, daemon=True).start()
 
     def _restore_completed_build(self):
@@ -1077,6 +1152,11 @@ class KernelManagerApp:
         self.root.destroy()
 
     def start_build(self):
+        needed = {"runtime", "build_toolchain", "build_headers", "build_utilities"}
+        if self.toolchain_var.get() == "clang":
+            needed.add("clang")
+        if not self._dependencies_available(needed):
+            return
         jobs = self.jobs_var.get()
         if not re.fullmatch(r"[1-9][0-9]*", jobs):
             messagebox.showerror("Build", "Parallel jobs must be a positive integer.")
@@ -1182,6 +1262,8 @@ class KernelManagerApp:
     def start_install(self):
         if not self.built_kernel_dir:
             messagebox.showerror("Install", "No completed kernel build is available.")
+            return
+        if not self._dependencies_available({"runtime", "kernel_install", "grub"}):
             return
         # Always use the current installer, never a stale source-tree copy.
         self._start_stream(["bash", str(INSTALL_SCRIPT)], Path(self.built_kernel_dir), "install")
@@ -1435,6 +1517,8 @@ class KernelManagerApp:
             self.mok_version_var.set(versions[0] if versions else "")
 
     def on_generate_mok_key(self):
+        if not self._dependencies_available({"signing"}):
+            return
         if mok_key_exists() and not messagebox.askyesno(
             "Generate key", "A key already exists — generate a new one and replace it?"
         ):
@@ -1442,12 +1526,16 @@ class KernelManagerApp:
         self._run_operation("Generating MOK signing key", generate_mok_key)
 
     def on_enroll_mok_key(self):
+        if not self._dependencies_available({"signing", "terminal"}):
+            return
         if not mok_key_exists():
             messagebox.showerror("Enroll key", "Generate a key first.")
             return
         self._run_operation("Enrolling MOK key", enroll_mok_key_in_terminal)
 
     def on_sign_kernel(self):
+        if not self._dependencies_available({"signing", "kernel_install"}):
+            return
         version = self.mok_version_var.get()
         if not version:
             messagebox.showinfo("Sign kernel", "Select a kernel version first.")
