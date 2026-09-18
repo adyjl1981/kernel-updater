@@ -33,6 +33,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 ### ---------- 0. Options ----------------------------------------------------
 USE_CLANG=false
 USE_LTO=false
+HARDWARE_OPTIMISED=false
 FORCE=false
 FULL_DEBUG_INFO=false
 JOBS=""
@@ -44,10 +45,11 @@ while [[ $# -gt 0 ]]; do
     --lto) USE_LTO=true; shift ;;
     --force) FORCE=true; shift ;;
     --full-debug-info) FULL_DEBUG_INFO=true; shift ;;
+    --hardware-optimised) HARDWARE_OPTIMISED=true; shift ;;
     --jobs) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || { echo "--jobs requires a positive integer" >&2; exit 1; }; JOBS="$2"; shift 2 ;;
     --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--clang] [--lto] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
+      echo "Usage: $0 [--clang] [--lto] [--hardware-optimised] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
       echo "  --lto              requires --clang. Not recommended on low-RAM/low-core machines."
       echo "  --force            rebuild even if this is the same version you last built."
       echo "  --full-debug-info  keep full debug info (DWARF + BTF). By default this script"
@@ -186,7 +188,7 @@ log "Latest stable kernel: $KVER"
 
 TOOLCHAIN=gcc
 $USE_CLANG && TOOLCHAIN=clang
-BUILD_ID="$KVER $TOOLCHAIN $USE_LTO $FULL_DEBUG_INFO $LOCALVERSION"
+BUILD_ID="$KVER $TOOLCHAIN $USE_LTO $FULL_DEBUG_INFO $HARDWARE_OPTIMISED $LOCALVERSION"
 TREE="$SRC_DIR/linux-$KVER"
 if ! $FORCE; then
   for candidate in "$SRC_DIR"/linux-"$KVER"*; do
@@ -260,6 +262,7 @@ log "Generating base config from your currently running kernel"
 if [[ -f "/boot/config-$(uname -r)" ]]; then
   cp "/boot/config-$(uname -r)" .config
 else
+  $HARDWARE_OPTIMISED && err "The running kernel configuration is unavailable; Hardware Optimised mode cannot safely continue. Use Standard mode."
   warn "No existing /boot/config-$(uname -r) found; using defconfig instead."
   make "${MAKE_ARGS[@]}" defconfig
 fi
@@ -269,6 +272,20 @@ make "${MAKE_ARGS[@]}" olddefconfig
 
 # Keep the running kernel's module coverage; loaded modules alone do not
 # describe all hardware or filesystems needed at the next boot.
+if $HARDWARE_OPTIMISED; then
+  [[ -r "$SCRIPT_DIR/hardware_optimizer.py" ]] || err "Hardware scanner is missing. Use Standard mode."
+  log "Scanning hardware and validating boot requirements"
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" scan || err "Hardware scan failed. Use Standard mode."
+  OPTIMISED_LSMOD=$(mktemp)
+  trap 'rm -f -- "${OPTIMISED_LSMOD:-}"' EXIT
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" lsmod > "$OPTIMISED_LSMOD" || err "Hardware scan is incomplete. Use Standard mode."
+  log "Optimising configuration for detected and active drivers"
+  LSMOD="$OPTIMISED_LSMOD" make "${MAKE_ARGS[@]}" localmodconfig
+  # Always restore the broad peripheral safety set after localmodconfig.
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config || err "Could not apply the compatibility safety set. Use Standard mode."
+  make "${MAKE_ARGS[@]}" olddefconfig
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config || err "Critical boot settings did not survive configuration validation. Use Standard mode."
+fi
 
 # Ubuntu/Debian kernels point CONFIG_SYSTEM_TRUSTED_KEYS and
 # CONFIG_SYSTEM_REVOCATION_KEYS at debian/canonical-*.pem files that only

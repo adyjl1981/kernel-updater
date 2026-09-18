@@ -302,7 +302,7 @@ class GuiStateTests(unittest.TestCase):
         app.refresh_installed = mock.Mock()
         app.refresh_maintenance_tab = mock.Mock()
         app.refresh_logs_tab = mock.Mock()
-        for name, value in (("jobs_var", "2"), ("toolchain_var", "gcc"), ("lto_var", False), ("debug_var", False), ("force_var", False)):
+        for name, value in (("jobs_var", "2"), ("toolchain_var", "gcc"), ("lto_var", False), ("debug_var", False), ("force_var", False), ("build_mode_var", "standard")):
             var = mock.Mock()
             var.get.return_value = value
             setattr(app, name, var)
@@ -358,6 +358,16 @@ class GuiStateTests(unittest.TestCase):
         with mock.patch.object(gui.subprocess, "Popen") as popen:
             self.app.start_build()
             popen.assert_not_called()
+
+    def test_build_modes_select_only_the_optimised_flag(self):
+        self.app._start_stream = mock.Mock()
+        self.app.start_build()
+        standard = self.app._start_stream.call_args.args[0]
+        self.assertNotIn("--hardware-optimised", standard)
+        self.app.build_mode_var.get.return_value = "hardware"
+        self.app.start_build()
+        optimised = self.app._start_stream.call_args.args[0]
+        self.assertIn("--hardware-optimised", optimised)
 
     def test_newer_running_kernel_is_not_an_update(self):
         with mock.patch.object(gui, "latest_stable_version", return_value="6.9.1"), mock.patch.object(gui, "running_kernel", return_value="6.10.0-custom"):

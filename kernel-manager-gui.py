@@ -42,6 +42,7 @@ from pathlib import Path
 from ubuntu_theme import apply_theme, scrolled_text, scrolled_tree
 from dependency_checker import (check_dependencies, initial_check_needed,
                                 install_packages, packages_to_install)
+from hardware_optimizer import Scanner, render_report
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
@@ -1048,6 +1049,14 @@ class KernelManagerApp:
     def _build_build_tab(self):
         frame = self.build_tab
 
+        mode = ttk.LabelFrame(frame, text="Build configuration")
+        mode.pack(fill="x", padx=4, pady=4)
+        self.build_mode_var = tk.StringVar(value=("hardware" if self.presets.get("build_mode") == "hardware" else "standard"))
+        ttk.Radiobutton(mode, text="Standard", variable=self.build_mode_var, value="standard").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Radiobutton(mode, text="Hardware Optimised", variable=self.build_mode_var, value="hardware").grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(mode, text="Targets this computer while retaining common removable and future peripherals.").grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Button(mode, text="Scan Hardware…", command=self.scan_hardware).grid(row=0, column=2, padx=10)
+
         opts = ttk.LabelFrame(frame, text="Toolchain options")
         opts.pack(fill="x", padx=4, pady=4)
 
@@ -1106,6 +1115,17 @@ class KernelManagerApp:
             self.lto_var.set(False)
             self.lto_check.configure(state="disabled")
 
+    def scan_hardware(self):
+        def done(report):
+            win = tk.Toplevel(self.root)
+            win.title("Hardware Optimisation Scan")
+            win.geometry("760x560")
+            panel, output = scrolled_text(win, wrap="word", height=28)
+            panel.pack(fill="both", expand=True, padx=12, pady=12)
+            output.insert("1.0", render_report(report))
+            output.configure(state="disabled")
+        self._read_async("Hardware scan", lambda: Scanner().scan(), done)
+
     def _append_log(self, text: str):
         append_bounded(self.log_text, text)
 
@@ -1146,6 +1166,7 @@ class KernelManagerApp:
             "lto": self.lto_var.get(),
             "debug": self.debug_var.get(),
             "jobs": self.jobs_var.get(),
+            "build_mode": self.build_mode_var.get(),
         }
         save_presets(self.presets)
         self.closed = True
@@ -1170,6 +1191,8 @@ class KernelManagerApp:
             cmd.append("--full-debug-info")
         if self.force_var.get():
             cmd.append("--force")
+        if self.build_mode_var.get() == "hardware":
+            cmd.append("--hardware-optimised")
         self._start_stream(cmd, SCRIPT_DIR, "build")
 
     def _start_stream(self, cmd, cwd, kind):
@@ -1187,7 +1210,8 @@ class KernelManagerApp:
             self.built_kernel_dir = None
             self.log_text.delete("1.0", "end")
             save_presets({"toolchain": self.toolchain_var.get(), "lto": self.lto_var.get(),
-                          "debug": self.debug_var.get(), "jobs": self.jobs_var.get()})
+                          "debug": self.debug_var.get(), "jobs": self.jobs_var.get(),
+                          "build_mode": self.build_mode_var.get()})
         self._append_log(f"$ {shlex.join(cmd)} (in {cwd})\n")
         fd = self.operation_lock.fileno()
         env["KERNEL_MANAGER_LOCK_FD"] = str(fd)
