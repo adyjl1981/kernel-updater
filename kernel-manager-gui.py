@@ -350,6 +350,11 @@ def find_source_tree(version):
     raise RuntimeError(f"No matching built source tree for {version}.")
 
 
+def completed_build_release(tree):
+    """Return the exact release produced by a completed build tree."""
+    return validate_release((Path(tree) / "include/config/kernel.release").read_text().strip())
+
+
 def kernel_build_source_dirs():
     """Extracted linux-<version> source trees under ~/kernel-build, which
     is where most of the disk space from repeated builds accumulates."""
@@ -1286,7 +1291,15 @@ class KernelManagerApp:
             rc = -signal.SIGTERM
         if kind == "build":
             self.built_kernel_dir = built_dir if rc == 0 else None
-            self.build_status_label.configure(text="Build completed" if rc == 0 else "Build stopped: see the verification/build details above")
+            if rc == 0:
+                try:
+                    release = completed_build_release(built_dir)
+                    status = f"Build completed: {release}"
+                except (OSError, RuntimeError, TypeError):
+                    status = "Build completed"
+            else:
+                status = "Build stopped: see the verification/build details above"
+            self.build_status_label.configure(text=status)
         elif rc == 0:
             self.built_kernel_dir = None
             self._append_log("Installed. Verify the boot menu, signatures, and fallback before rebooting.\n")

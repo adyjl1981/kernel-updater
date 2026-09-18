@@ -37,7 +37,8 @@ HARDWARE_OPTIMISED=false
 FORCE=false
 FULL_DEBUG_INFO=false
 JOBS=""
-LOCALVERSION="-custom"
+LOCALVERSION=""
+LOCALVERSION_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     --full-debug-info) FULL_DEBUG_INFO=true; shift ;;
     --hardware-optimised) HARDWARE_OPTIMISED=true; shift ;;
     --jobs) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || { echo "--jobs requires a positive integer" >&2; exit 1; }; JOBS="$2"; shift 2 ;;
-    --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; shift 2 ;;
+    --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; LOCALVERSION_EXPLICIT=true; shift 2 ;;
     -h|--help)
       echo "Usage: $0 [--clang] [--lto] [--hardware-optimised] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
       echo "  --lto              requires --clang. Not recommended on low-RAM/low-core machines."
@@ -61,6 +62,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
+
+if ! $LOCALVERSION_EXPLICIT; then
+  if $HARDWARE_OPTIMISED; then
+    LOCALVERSION="-optimized"
+  else
+    LOCALVERSION="-custom"
+  fi
+fi
 
 log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
 warn() { echo -e "\n\033[1;33m[warn]\033[0m $*"; }

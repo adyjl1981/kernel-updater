@@ -393,7 +393,8 @@ args = sys.argv[1:]
 name = pathlib.Path(sys.argv[0]).name
 with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps([name, args]) + "\n")
-version = "9.9.9-custom"
+localversion = next((arg.split("=", 1)[1] for arg in args if arg.startswith("LOCALVERSION=")), "-custom")
+version = "9.9.9" + localversion
 if name == "sudo":
     while args and args[0].startswith("-"):
         args.pop(0)
@@ -463,9 +464,12 @@ elif name == "make":
         for path, data in (("vmlinux", "kernel"), ("System.map", "map"), ("arch/x86/boot/bzImage", "image"), ("include/config/kernel.release", version), ("drivers/test.ko", "module")):
             path = pathlib.Path(path); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(data)
 elif name == "update-initramfs":
-    (root / "system/boot" / ("initrd.img-" + version)).write_text("initramfs")
+    release = args[args.index("-k") + 1]
+    (root / "system/boot" / ("initrd.img-" + release)).write_text("initramfs")
 elif name == "update-grub":
-    (root / "system/boot/grub/grub.cfg").write_text("menuentry 'Linux " + version + "' {\n}\n")
+    images = sorted((root / "system/boot").glob("vmlinuz-9.9.9*"))
+    release = images[-1].name.removeprefix("vmlinuz-") if images else version
+    (root / "system/boot/grub/grub.cfg").write_text("menuentry 'Linux " + release + "' {\n}\n")
 else:
     raise RuntimeError("Unexpected test command: " + name)
 '''
@@ -494,8 +498,17 @@ class ShellIntegrationTests(unittest.TestCase):
             code = code.replace("arch/x86" + str(self.root / "system/boot"), "arch/x86/boot")
             code = code.replace("/lib/modules", str(self.root / "system/lib/modules"))
             (self.root / name).write_text(code)
+        (self.root / "hardware_optimizer.py").write_text(
+            "import pathlib,sys\n"
+            "action=sys.argv[1]\n"
+            "if action == 'scan': print('fixture hardware: ready')\n"
+            "elif action == 'lsmod': print('Module Size Used by\\nnvme 0 0')\n"
+        )
         (self.root / "system/boot/grub").mkdir(parents=True)
         (self.root / "system/boot/grub/grub.cfg").write_text("menuentry 'old' {\n}\n")
+        (self.root / "system/boot/config-8.8.8-running").write_text(
+            "CONFIG_MODULES=y\nCONFIG_MODULE_SIG=y\n"
+        )
         (self.root / "system/lib/modules").mkdir(parents=True)
         source = self.root / "fixture/linux-9.9.9"
         (source / "scripts").mkdir(parents=True)
@@ -538,6 +551,25 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn("already complete", proc.stdout)
         self.assertIn("KERNEL_MANAGER_BUILD_DIR=", proc.stdout)
         self.assertFalse(list((self.root / "kernel-build").glob("previous-*")))
+
+    def test_hardware_optimised_default_release_is_used_through_install(self):
+        proc = self.build("--hardware-optimised")
+        self.assertIn("Kernel 9.9.9-optimized is built", proc.stdout)
+        args = (self.tree / ".kernel-manager-make-args").read_bytes().split(b"\0")
+        self.assertIn(b"LOCALVERSION=-optimized", args)
+        self.assertEqual((self.tree / "include/config/kernel.release").read_text(),
+                         "9.9.9-optimized")
+        installed = self.run_script("install-custom-kernel.sh", cwd=self.tree)
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        self.assertTrue((self.root / "system/boot/vmlinuz-9.9.9-optimized").is_file())
+        self.assertTrue((self.root / "system/boot/initrd.img-9.9.9-optimized").is_file())
+        self.assertIn("9.9.9-optimized", (self.root / "system/boot/grub/grub.cfg").read_text())
+
+    def test_explicit_localversion_overrides_optimised_default(self):
+        self.build("--hardware-optimised", "--localversion", "-lab")
+        args = (self.tree / ".kernel-manager-make-args").read_bytes().split(b"\0")
+        self.assertIn(b"LOCALVERSION=-lab", args)
+        self.assertEqual((self.tree / "include/config/kernel.release").read_text(), "9.9.9-lab")
 
     def test_clang_lto_is_used_for_configuration_and_install(self):
         self.build("--clang", "--lto")
@@ -867,6 +899,38 @@ class DesktopTests(unittest.TestCase):
 
 
 class AdditionalRegressionTests(unittest.TestCase):
+    def test_optimized_release_is_discovered_and_matched_in_grub(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            root = Path(tmp)
+            modules_root = root / "modules"
+            (modules_root / "7.2.6-optimized").mkdir(parents=True)
+            stack.enter_context(mock.patch.object(gui, "running_kernel", return_value="7.2.0-custom"))
+            stack.enter_context(mock.patch.object(gui, "package_manager_for_kernel", return_value="custom"))
+            stack.enter_context(mock.patch.object(
+                gui, "Path", side_effect=lambda value: modules_root
+                if str(value) == "/lib/modules" else Path(value)))
+            stack.enter_context(mock.patch.object(gui.subprocess, "check_output", return_value="1M\n"))
+            with mock.patch.object(gui, "KERNEL_BUILD_DIR", root):
+                kernels = gui.list_installed_kernels()
+                self.assertEqual([(k.version, k.manager) for k in kernels],
+                                 [("7.2.6-optimized", "custom")])
+                config = "menuentry 'Ubuntu, with Linux 7.2.6-optimized' {\n linux /boot/vmlinuz-7.2.6-optimized root=/dev/test ro\n}\n"
+                self.assertEqual(gui.grub_entry_title("7.2.6-optimized", config=config),
+                                 "Ubuntu, with Linux 7.2.6-optimized")
+
+    def test_gui_completed_status_uses_exact_optimized_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / "include/config").mkdir(parents=True)
+            (tree / "include/config/kernel.release").write_text("7.2.6-optimized")
+            app = gui.KernelManagerApp.__new__(gui.KernelManagerApp)
+            app.cancel_thread = None
+            app.build_status_label = mock.Mock()
+            app._finish_operation = mock.Mock()
+            app._stream_finished("build", 0, str(tree))
+            app.build_status_label.configure.assert_called_once_with(
+                text="Build completed: 7.2.6-optimized")
+
     def test_source_lookup_finds_rebuild_directories(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(gui, "KERNEL_BUILD_DIR", Path(tmp)):
             tree = Path(tmp) / "linux-6.1.rebuild.ABC123"
