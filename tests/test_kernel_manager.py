@@ -415,9 +415,34 @@ elif name == "curl":
             sys.exit(22)
         else: shutil.copyfile(root / "fixture.tar.xz", output)
 elif name == "gpg":
-    if "--verify" in args:
+    homedir = pathlib.Path(args[args.index("--homedir") + 1])
+    marker = homedir / "trusted.key"
+    if "--locate-keys" in args:
+        if os.environ.get("KERNEL_TEST_KEY_ACQUIRE_FAIL"): sys.exit(1)
+        homedir.mkdir(parents=True, exist_ok=True)
+        marker.write_text("key")
+    elif "--list-keys" in args:
+        if not marker.exists(): sys.exit(2)
+        fingerprint = ("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                       if os.environ.get("KERNEL_TEST_WRONG_FINGERPRINT")
+                       else "647F28654894E3BD457199BE38DBBDC86092693E")
+        print("pub:-:4096:1:38DBBDC86092693E:0:0:::::::")
+        print("fpr:::::::::" + fingerprint + ":")
+    elif "--export" in args:
+        if not marker.exists(): sys.exit(2)
+        print("trusted public key")
+    elif "--import" in args:
+        sys.stdin.read()
+        homedir.mkdir(parents=True, exist_ok=True)
+        marker.write_text("key")
+    elif "--verify" in args:
         sys.stdin.buffer.read()
-        if os.environ.get("KERNEL_TEST_BAD_SIGNATURE"): sys.exit(1)
+        if os.environ.get("KERNEL_TEST_BAD_SIGNATURE"):
+            print("[GNUPG:] BADSIG 38DBBDC86092693E Greg Kroah-Hartman")
+            sys.exit(1)
+        if not marker.exists():
+            print("[GNUPG:] NO_PUBKEY 38DBBDC86092693E")
+            sys.exit(2)
         print("[GNUPG:] VALIDSIG 647F28654894E3BD457199BE38DBBDC86092693E 0 0 0 0 0 0 0 0")
 elif name == "make":
     if "kernelrelease" in args:
@@ -453,7 +478,7 @@ class ShellIntegrationTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         bindir = self.root / "bin"
         bindir.mkdir()
-        for name in ("bash", "python3", "awk", "cat", "grep", "flock", "mkdir", "chmod", "sha256sum", "cp", "cut", "mv", "mktemp", "df", "du", "find", "tar", "xz", "timeout", "tee", "nproc", "sort", "tail", "dirname"):
+        for name in ("bash", "python3", "awk", "cat", "grep", "flock", "mkdir", "chmod", "sha256sum", "cp", "cut", "mv", "mktemp", "rm", "df", "du", "find", "tar", "xz", "timeout", "tee", "nproc", "sort", "tail", "dirname"):
             binary = shutil.which(name)
             if not binary: self.skipTest(f"Required test utility missing: {name}")
             (bindir / name).symlink_to(binary)
@@ -542,10 +567,57 @@ class ShellIntegrationTests(unittest.TestCase):
     def test_bad_signature_never_extracts_or_moves_existing_tree(self):
         self.tree.mkdir(parents=True)
         (self.tree / "keep").write_text("original")
+        keyring = self.root / "kernel-build/.gnupg"
+        keyring.mkdir()
+        (keyring / "trusted.key").write_text("key")
         proc = self.run_script("build-custom-kernel.sh", KERNEL_TEST_BAD_SIGNATURE="1")
         self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("bad or invalid signature", proc.stdout + proc.stderr)
         self.assertEqual((self.tree / "keep").read_text(), "original")
         self.assertFalse((self.tree / "Makefile").exists())
+        self.assertTrue((self.root / "kernel-build/linux-9.9.9.tar.xz").is_file())
+
+    def test_valid_signature_with_already_trusted_key(self):
+        keyring = self.root / "kernel-build/.gnupg"
+        keyring.mkdir(parents=True)
+        (keyring / "trusted.key").write_text("key")
+        proc = self.build()
+        self.assertIn("signature is valid", proc.stdout)
+        self.assertFalse(any("--locate-keys" in args for name, args in self.commands() if name == "gpg"))
+
+    def test_missing_key_is_reported_and_acquired_then_verification_retried(self):
+        proc = self.build()
+        self.assertIn("signing key is missing", proc.stdout)
+        self.assertIn("Trusted kernel.org release signing key acquired", proc.stdout)
+        gpg_calls = [args for name, args in self.commands() if name == "gpg"]
+        self.assertTrue(any("--locate-keys" in args and "gregkh@kernel.org" in args for args in gpg_calls))
+        self.assertEqual(sum("--verify" in args for args in gpg_calls), 2)
+
+    def test_wrong_wkd_fingerprint_is_rejected_before_verification(self):
+        proc = self.run_script("build-custom-kernel.sh", KERNEL_TEST_WRONG_FINGERPRINT="1")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unexpected fingerprint", proc.stdout)
+        self.assertIn("Refusing an untrusted", proc.stdout + proc.stderr)
+        gpg_calls = [args for name, args in self.commands() if name == "gpg"]
+        self.assertEqual(sum("--verify" in args for args in gpg_calls), 1)
+        self.assertFalse(any("--import" in args for args in gpg_calls))
+        self.assertTrue((self.root / "kernel-build/linux-9.9.9.tar.xz").is_file())
+
+    def test_key_acquisition_failure_stops_and_retains_archive(self):
+        proc = self.run_script("build-custom-kernel.sh", KERNEL_TEST_KEY_ACQUIRE_FAIL="1")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("could not be obtained and validated safely", proc.stdout + proc.stderr)
+        self.assertTrue((self.root / "kernel-build/linux-9.9.9.tar.xz").is_file())
+        self.assertFalse(self.tree.exists())
+
+    def test_cached_archive_is_verified_on_retry_without_redownload(self):
+        first = self.run_script("build-custom-kernel.sh", KERNEL_TEST_KEY_ACQUIRE_FAIL="1")
+        self.assertNotEqual(first.returncode, 0)
+        before = len([1 for name, args in self.commands() if name == "curl" and "linux-9.9.9.tar.xz" in args])
+        self.build()
+        after = len([1 for name, args in self.commands() if name == "curl" and "linux-9.9.9.tar.xz" in args])
+        self.assertEqual(before, after)
+        self.assertTrue(self.tree.is_dir())
 
     def test_partial_download_is_not_cached_as_finished(self):
         proc = self.run_script("build-custom-kernel.sh", KERNEL_TEST_DOWNLOAD_FAIL="1")

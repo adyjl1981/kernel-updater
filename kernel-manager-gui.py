@@ -1118,6 +1118,8 @@ class KernelManagerApp:
         self.install_btn.pack(side="left", padx=6)
 
         ttk.Label(frame, text="Live build output:").pack(anchor="w", padx=4)
+        self.build_status_label = ttk.Label(frame, text="Ready", style="Status.TLabel")
+        self.build_status_label.pack(fill="x", padx=4, pady=(0, 4))
         log_frame, self.log_text = scrolled_text(frame, wrap="none", height=20)
         log_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
@@ -1241,6 +1243,9 @@ class KernelManagerApp:
                 with proc.stdout:
                     for line in proc.stdout:
                         self.log_queue.put(line[:65536])
+                        if kind == "build" and line.startswith("KERNEL_MANAGER_STATUS="):
+                            status = line.rstrip("\n").split("=", 1)[1]
+                            self._dispatch(lambda value=status: self.build_status_label.configure(text=value))
                         if kind == "build" and line.strip() == "KERNEL_MANAGER_CANCELLABLE=1":
                             self._dispatch(self._allow_build_stop)
                         if kind == "build" and line.startswith("KERNEL_MANAGER_BUILD_DIR="):
@@ -1281,6 +1286,7 @@ class KernelManagerApp:
             rc = -signal.SIGTERM
         if kind == "build":
             self.built_kernel_dir = built_dir if rc == 0 else None
+            self.build_status_label.configure(text="Build completed" if rc == 0 else "Build stopped: see the verification/build details above")
         elif rc == 0:
             self.built_kernel_dir = None
             self._append_log("Installed. Verify the boot menu, signatures, and fallback before rebooting.\n")

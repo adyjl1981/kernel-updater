@@ -214,19 +214,81 @@ if [[ ! -f "$TARBALL" ]]; then
   mv -- "$TARBALL.part" "$TARBALL"
 fi
 
-# Verify the uncompressed tar against kernel.org's release-signing key.
-# Fingerprint published at https://www.kernel.org/signature.html.
+# Verify the uncompressed tar against kernel.org's release-signing key.  Since
+# Linux 4.18 kernel.org tarballs are signed by Greg Kroah-Hartman.  Both the WKD
+# address and full fingerprint are published at https://www.kernel.org/signature.html.
+# Do not infer trust from a key ID in the downloaded signature.
 SIGNER=647F28654894E3BD457199BE38DBBDC86092693E
+SIGNER_WKD=gregkh@kernel.org
 GPG_DIR="$SRC_DIR/.gnupg"
 mkdir -p "$GPG_DIR"
 chmod 700 "$GPG_DIR"
-if ! gpg --homedir "$GPG_DIR" --batch --list-keys "$SIGNER" >/dev/null 2>&1; then
-  timeout 60 gpg --homedir "$GPG_DIR" --batch --keyserver hkps://keys.openpgp.org --recv-keys "$SIGNER"
-fi
 curl "${CURL_OPTS[@]}" -o "$TARBALL.sign.part" "${URL%.xz}.sign"
 mv -- "$TARBALL.sign.part" "$TARBALL.sign"
-STATUS=$(xz -cd -- "$TARBALL" | gpg --homedir "$GPG_DIR" --batch --status-fd=1 --verify "$TARBALL.sign" -) || err "Source signature verification failed; cached archive: $SRC_DIR/$TARBALL"
-printf '%s\n' "$STATUS" | awk -v key="$SIGNER" '$2 == "VALIDSIG" && ($3 == key || $NF == key) {ok=1} END {exit !ok}' || err "Unexpected release signer."
+
+keyring_has_expected_signer() {
+  gpg --homedir "$GPG_DIR" --batch --with-colons --fingerprint --list-keys "$SIGNER" 2>/dev/null |
+    awk -F: -v key="$SIGNER" '$1 == "fpr" && $10 == key {found=1} END {exit !found}'
+}
+
+acquire_expected_signer() {
+  local staging fetched
+  staging=$(mktemp -d "$SRC_DIR/.gnupg-fetch.XXXXXX") || return 1
+  chmod 700 "$staging"
+  log "Kernel.org release signing key is missing; retrieving $SIGNER_WKD through kernel.org WKD"
+  echo "KERNEL_MANAGER_STATUS=Authenticating the kernel.org release signing key…"
+  if ! timeout 60 gpg --homedir "$staging" --batch --auto-key-locate clear,wkd --locate-keys "$SIGNER_WKD" >/dev/null 2>&1; then
+    rm -rf -- "$staging"
+    return 1
+  fi
+  fetched=$(gpg --homedir "$staging" --batch --with-colons --fingerprint --list-keys "$SIGNER_WKD" 2>/dev/null |
+    awk -F: '$1 == "fpr" {print $10; exit}')
+  if [[ "$fetched" != "$SIGNER" ]]; then
+    warn "Kernel.org WKD returned unexpected fingerprint ${fetched:-<none>}; expected $SIGNER. The key was not trusted or imported."
+    rm -rf -- "$staging"
+    return 2
+  fi
+  if ! gpg --homedir "$staging" --batch --export "$SIGNER" |
+       gpg --homedir "$GPG_DIR" --batch --import >/dev/null 2>&1; then
+    rm -rf -- "$staging"
+    return 1
+  fi
+  rm -rf -- "$staging"
+  keyring_has_expected_signer
+}
+
+verify_source_signature() {
+  xz -cd -- "$TARBALL" |
+    gpg --homedir "$GPG_DIR" --batch --status-fd=1 --verify "$TARBALL.sign" - 2>&1
+}
+
+echo "KERNEL_MANAGER_STATUS=Cryptographically verifying the downloaded kernel source…"
+VERIFY_STATUS=""
+if ! VERIFY_STATUS=$(verify_source_signature); then
+  if printf '%s\n' "$VERIFY_STATUS" | grep -q '^\[GNUPG:\] NO_PUBKEY '; then
+    acquire_rc=0
+    acquire_expected_signer || acquire_rc=$?
+    if (( acquire_rc == 2 )); then
+      err "Refusing an untrusted kernel.org signing key. Source archive retained at $SRC_DIR/$TARBALL"
+    elif (( acquire_rc != 0 )); then
+      err "The required kernel.org signing key could not be obtained and validated safely. Check HTTPS/network access to kernel.org; source archive retained at $SRC_DIR/$TARBALL"
+    fi
+    log "Trusted kernel.org release signing key acquired; retrying source verification"
+    echo "KERNEL_MANAGER_STATUS=Trusted signing key acquired; retrying source verification…"
+    if ! VERIFY_STATUS=$(verify_source_signature); then
+      if printf '%s\n' "$VERIFY_STATUS" | grep -q '^\[GNUPG:\] NO_PUBKEY '; then
+        err "The signature requires a public key that is not an approved kernel.org release key. Source archive retained at $SRC_DIR/$TARBALL"
+      fi
+      err "Kernel source has a bad or invalid signature and may be corrupt or tampered with. Source archive retained at $SRC_DIR/$TARBALL"
+    fi
+  else
+    err "Kernel source has a bad or invalid signature and may be corrupt or tampered with. Source archive retained at $SRC_DIR/$TARBALL"
+  fi
+fi
+printf '%s\n' "$VERIFY_STATUS" | awk -v key="$SIGNER" '$2 == "VALIDSIG" && ($3 == key || $NF == key) {ok=1} END {exit !ok}' || \
+  err "The source signature is valid but was made by an unexpected key. Source archive retained at $SRC_DIR/$TARBALL"
+log "Kernel source signature is valid and matches the trusted kernel.org release signer"
+echo "KERNEL_MANAGER_STATUS=Kernel source signature verified."
 
 # Leave existing trees in place: installed modules may link to their headers.
 if [[ -e "$TREE" || -L "$TREE" ]]; then
