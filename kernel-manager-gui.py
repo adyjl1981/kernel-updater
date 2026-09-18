@@ -744,12 +744,6 @@ class KernelManagerApp:
         self._prev_cpu_times = None
         self.presets = load_presets()
 
-        menu = tk.Menu(root)
-        tools_menu = tk.Menu(menu, tearoff=False)
-        tools_menu.add_command(label="Check Dependencies…", command=self.on_check_dependencies)
-        menu.add_cascade(label="Tools", menu=tools_menu)
-        root.configure(menu=menu)
-
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=12, pady=12)
         nb.enable_traversal()
@@ -759,12 +753,14 @@ class KernelManagerApp:
         self.logs_tab = ttk.Frame(nb, padding=12)
         self.maintenance_tab = ttk.Frame(nb, padding=12)
         self.sysinfo_tab = ttk.Frame(nb, padding=12)
+        self.tools_tab = ttk.Frame(nb, padding=12)
         self.mok_tab = ttk.Frame(nb, padding=12)
         nb.add(self.installed_tab, text="Installed Kernels")
         nb.add(self.build_tab, text="Build New Kernel")
         nb.add(self.logs_tab, text="Build Logs")
         nb.add(self.maintenance_tab, text="Maintenance")
         nb.add(self.sysinfo_tab, text="System Info")
+        nb.add(self.tools_tab, text="Tools")
         nb.add(self.mok_tab, text="Secure Boot (MOK)")
 
         self._build_installed_tab()
@@ -772,6 +768,7 @@ class KernelManagerApp:
         self._build_logs_tab()
         self._build_maintenance_tab()
         self._build_sysinfo_tab()
+        self._build_tools_tab()
         self._build_mok_tab()
 
         self.refresh_installed()
@@ -786,6 +783,22 @@ class KernelManagerApp:
         save_presets({"dependency_check_completed": True})
         self.presets["dependency_check_completed"] = True
         self.on_check_dependencies(show_if_ready=False)
+
+    def _build_tools_tab(self):
+        frame = self.tools_tab
+        dependencies = ttk.LabelFrame(frame, text="Dependencies")
+        dependencies.pack(fill="x", padx=4, pady=4)
+        ttk.Label(
+            dependencies,
+            text="Check that the software required by Kernel Manager features is available.",
+        ).pack(anchor="w", padx=8, pady=(8, 4))
+        actions = ttk.Frame(dependencies)
+        actions.pack(fill="x", padx=8, pady=(4, 8))
+        self.tools_dependency_btn = ttk.Button(
+            actions, text="Check Dependencies…", command=self.on_check_dependencies,
+            style="Accent.TButton",
+        )
+        self.tools_dependency_btn.pack(side="left")
 
     def on_check_dependencies(self, show_if_ready=True):
         def done(checked):

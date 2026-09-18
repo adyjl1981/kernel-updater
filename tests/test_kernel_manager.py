@@ -840,6 +840,7 @@ class AdditionalRegressionTests(unittest.TestCase):
         class Widget:
             def __init__(self, *args, **kwargs):
                 self.rows = {}
+                self.kwargs = kwargs
             def __getattr__(self, name):
                 return lambda *args, **kwargs: None
             def get_children(self):
@@ -869,8 +870,11 @@ class AdditionalRegressionTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(gui, "apply_theme"))
             stack.enter_context(mock.patch.object(gui.KernelManagerApp, "_read_async"))
             app = gui.KernelManagerApp(Widget())
-            for name in ("tree", "install_btn", "maint_tree", "logs_tree", "mok_version_combo", "sysinfo_text"):
+            for name in ("tree", "install_btn", "maint_tree", "logs_tree", "mok_version_combo", "sysinfo_text", "tools_tab", "tools_dependency_btn"):
                 self.assertTrue(hasattr(app, name))
+            self.assertEqual(app.tools_dependency_btn.kwargs["text"], "Check Dependencies…")
+            self.assertIs(app.tools_dependency_btn.kwargs["command"].__self__, app)
+            self.assertIs(app.tools_dependency_btn.kwargs["command"].__func__, gui.KernelManagerApp.on_check_dependencies)
             self.assertIsNone(app.busy)
             self.assertFalse(app.build_cancellable)
 
