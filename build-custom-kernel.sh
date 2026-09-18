@@ -341,12 +341,16 @@ if $HARDWARE_OPTIMISED; then
   OPTIMISED_LSMOD=$(mktemp)
   trap 'rm -f -- "${OPTIMISED_LSMOD:-}"' EXIT
   python3 "$SCRIPT_DIR/hardware_optimizer.py" lsmod > "$OPTIMISED_LSMOD" || err "Hardware scan is incomplete. Use Standard mode."
+  # localmodconfig removes non-module early-boot bools.  Retain a read-only
+  # snapshot of the known-working config so the optimiser can restore them.
+  BASELINE_CONFIG="$PWD/.kernel-manager-working-config"
+  cp .config "$BASELINE_CONFIG"
   log "Optimising configuration for detected and active drivers"
   LSMOD="$OPTIMISED_LSMOD" make "${MAKE_ARGS[@]}" localmodconfig
   # Always restore the broad peripheral safety set after localmodconfig.
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config || err "Could not apply the compatibility safety set. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config --baseline "$BASELINE_CONFIG" || err "Could not apply the compatibility safety set. Use Standard mode."
   make "${MAKE_ARGS[@]}" olddefconfig
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config || err "Critical boot settings did not survive configuration validation. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" || err "Critical boot settings did not survive configuration validation. Use Standard mode."
 fi
 
 # Ubuntu/Debian kernels point CONFIG_SYSTEM_TRUSTED_KEYS and

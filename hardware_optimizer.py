@@ -28,6 +28,12 @@ SAFETY_BUILTIN = {
     "TMPFS", "PROC_FS", "SYSFS", "EFI", "EFI_STUB", "PARTITION_ADVANCED",
     "EFI_PARTITION", "MSDOS_PARTITION", "NET", "INET", "IPV6", "PCI",
     "HOTPLUG_PCI", "USB_SUPPORT", "USB", "HID", "INPUT", "VT",
+    # AF_UNIX is used by udev/systemd in the initramfs.  It is a bool, not a
+    # module: asking Kconfig for CONFIG_UNIX=m silently leaves it disabled.
+    "UNIX", "PRINTK", "VT_CONSOLE", "VGA_CONSOLE", "FRAMEBUFFER_CONSOLE",
+    # Keep every external-initramfs format which Ubuntu may select.
+    "RD_GZIP", "RD_BZIP2", "RD_LZMA", "RD_XZ", "RD_LZO", "RD_LZ4", "RD_ZSTD",
+    "FW_LOADER", "ACPI", "PCI_MSI",
 }
 SAFETY_MODULES = {
     # USB hosts, hubs/storage and removable media
@@ -45,13 +51,34 @@ SAFETY_MODULES = {
     "USB_SERIAL_CP210X", "USB_ACM",
     # Normal desktop networking, Wi-Fi, printing and display connectors
     "NETDEVICES", "ETHERNET", "WLAN", "CFG80211", "MAC80211", "RFKILL",
-    "PACKET", "UNIX", "NETFILTER", "BRIDGE", "VLAN_8021Q", "MDNS_RESOLVER",
+    "PACKET", "NETFILTER", "BRIDGE", "VLAN_8021Q", "MDNS_RESOLVER",
     "USB_USBNET", "USB_NET_CDCETHER", "USB_NET_RNDIS_HOST", "PPP",
     "DRM", "DRM_KMS_HELPER", "DRM_DISPLAY_HELPER", "I2C", "I2C_ALGOBIT",
     "TYPEC", "USB_TYPEC", "THUNDERBOLT",
     # Common removable-drive filesystems and character sets
     "FAT_FS", "VFAT_FS", "EXFAT_FS", "NTFS3_FS", "FUSE_FS", "NLS",
     "NLS_CODEPAGE_437", "NLS_ISO8859_1", "NLS_UTF8",
+}
+
+# localmodconfig is deliberately aggressive and also removes bools which do
+# not correspond to a loaded module.  Preserve the known-working kernel's
+# choices for a curated early-boot surface for the current architecture instead
+# of trying to rediscover all of Kconfig's platform dependency graph here.
+BOOT_BASELINE_SYMBOLS = {
+    "64BIT", "X86_64", "SMP", "X86_LOCAL_APIC", "X86_IO_APIC",
+    "ACPI", "ACPI_I2C_OPREGION", "PCI", "PCI_MSI", "PCI_DIRECT",
+    "EFI", "EFI_STUB", "EFI_MIXED", "EFI_RUNTIME_MAP", "EFIVAR_FS",
+    "FW_LOADER", "MODULES", "BLOCK", "SCSI", "BLK_DEV_INITRD",
+    "DEVTMPFS", "DEVTMPFS_MOUNT", "TMPFS", "PROC_FS", "SYSFS",
+    "UNIX", "PRINTK", "VT", "VT_CONSOLE", "VGA_CONSOLE",
+    "FRAMEBUFFER_CONSOLE", "FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER",
+    "SERIAL_8250", "SERIAL_8250_CONSOLE", "EARLY_PRINTK",
+    "DRM", "DRM_KMS_HELPER", "DRM_CLIENT_LIB", "DRM_CLIENT_SELECTION",
+    "DRM_GEM_SHMEM_HELPER", "DRM_SYSFB_HELPER", "DRM_SIMPLEDRM",
+    "RD_GZIP", "RD_BZIP2", "RD_LZMA", "RD_XZ", "RD_LZO", "RD_LZ4", "RD_ZSTD",
+    "PARTITION_ADVANCED", "EFI_PARTITION", "MSDOS_PARTITION",
+    "MD", "BLK_DEV_MD", "BLK_DEV_DM", "BLK_DEV_DM_BUILTIN",
+    "DM_INIT", "DM_UEVENT", "DM_CRYPT",
 }
 
 
@@ -175,11 +202,22 @@ def render_report(r):
     return "\n".join(lines)
 
 
-def update_config(path, report):
+def _config_values(path):
+    text = Path(path).read_text()
+    return dict(re.findall(r"^CONFIG_([A-Z0-9_]+)=([^\n]+)$", text, re.M))
+
+
+def update_config(path, report, baseline=None):
     """Apply required values without touching an installed kernel config."""
     config = Path(path)
     values = {x: "y" for x in SAFETY_BUILTIN}
     values.update({x: "m" for x in SAFETY_MODULES})
+    if baseline:
+        baseline_values = _config_values(baseline)
+        for symbol in BOOT_BASELINE_SYMBOLS:
+            value = baseline_values.get(symbol)
+            if value in ("y", "m"):
+                values[symbol] = value
     values[FS_CONFIG[report.root_filesystem]] = "y"
     for fs in report.boot_filesystems:
         if fs in FS_CONFIG: values[FS_CONFIG[fs]] = "y"
@@ -196,12 +234,29 @@ def update_config(path, report):
     config.write_text("\n".join(output) + "\n")
 
 
-def verify_config(path, report):
+def verify_config(path, report, baseline=None):
     text = Path(path).read_text()
     values = dict(re.findall(r"^(CONFIG_[A-Z0-9_]+)=([ym])$", text, re.M))
     required = {"CONFIG_MODULES", "CONFIG_BLOCK", "CONFIG_BLK_DEV_INITRD",
-                "CONFIG_DEVTMPFS", "CONFIG_" + FS_CONFIG[report.root_filesystem]}
+                "CONFIG_DEVTMPFS", "CONFIG_UNIX", "CONFIG_PRINTK",
+                "CONFIG_RD_GZIP", "CONFIG_RD_ZSTD",
+                "CONFIG_" + FS_CONFIG[report.root_filesystem]}
+    if report.architecture in ("x86_64", "amd64"):
+        required.update({"CONFIG_X86_64", "CONFIG_ACPI", "CONFIG_PCI",
+                         "CONFIG_EFI", "CONFIG_EFI_STUB", "CONFIG_VT_CONSOLE",
+                         "CONFIG_FRAMEBUFFER_CONSOLE"})
+    if baseline:
+        baseline_values = _config_values(baseline)
+        required.update("CONFIG_" + symbol for symbol in BOOT_BASELINE_SYMBOLS
+                        if baseline_values.get(symbol) == "y")
     missing = sorted(key for key in required if values.get(key) != "y")
+    if baseline:
+        mismatched = sorted(
+            "CONFIG_" + symbol for symbol in BOOT_BASELINE_SYMBOLS
+            if baseline_values.get(symbol) in ("y", "m")
+            and values.get("CONFIG_" + symbol) != baseline_values[symbol]
+        )
+        missing = sorted(set(missing + mismatched))
     if missing:
         raise RuntimeError("critical settings were rejected by Kconfig: " + ", ".join(missing))
 
@@ -210,6 +265,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("scan", "lsmod", "apply", "verify"))
     parser.add_argument("path", nargs="?")
+    parser.add_argument("--baseline")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     report = Scanner().scan()
@@ -221,10 +277,10 @@ def main():
         for module in report.modules: print(f"{module} 0 0")
     elif args.action == "apply":
         if not args.path: parser.error("apply requires a config path")
-        update_config(args.path, report)
+        update_config(args.path, report, args.baseline)
     elif args.action == "verify":
         if not args.path: parser.error("verify requires a config path")
-        try: verify_config(args.path, report)
+        try: verify_config(args.path, report, args.baseline)
         except RuntimeError as exc: raise SystemExit(f"Hardware optimisation refused: {exc}")
 
 

@@ -70,8 +70,38 @@ class ConfigSafetyTests(unittest.TestCase):
             text = config.read_text()
             for setting in ("CONFIG_USB_STORAGE=m", "CONFIG_BT=m", "CONFIG_USB_PRINTER=m",
                             "CONFIG_EXFAT_FS=m", "CONFIG_NTFS3_FS=m", "CONFIG_EXT4_FS=y",
-                            "CONFIG_VFAT_FS=y", "CONFIG_BLK_DEV_INITRD=y"):
+                            "CONFIG_VFAT_FS=y", "CONFIG_BLK_DEV_INITRD=y",
+                            "CONFIG_UNIX=y", "CONFIG_RD_ZSTD=y"):
                 self.assertIn(setting, text)
+
+    def test_working_early_boot_choices_survive_localmodconfig(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".config"
+            baseline = Path(tmp) / "working.config"
+            # This reproduces the 7.2.6 omission: localmodconfig disabled UNIX
+            # and demoted the boot display stack despite the working config.
+            config.write_text("# CONFIG_UNIX is not set\nCONFIG_DRM_SIMPLEDRM=m\n"
+                              "# CONFIG_BLK_DEV_DM is not set\n")
+            baseline.write_text("CONFIG_UNIX=y\nCONFIG_DRM_SIMPLEDRM=y\n"
+                                "CONFIG_BLK_DEV_DM=y\nCONFIG_RD_ZSTD=y\n")
+            report = hw.HardwareReport("x86_64", "CPU", "/dev/nvme0n1p5",
+                                       "ext4", modules=["nvme"], safe=True)
+            hw.update_config(config, report, baseline)
+            text = config.read_text()
+            for setting in ("CONFIG_UNIX=y", "CONFIG_DRM_SIMPLEDRM=y",
+                            "CONFIG_BLK_DEV_DM=y", "CONFIG_RD_ZSTD=y"):
+                self.assertIn(setting, text)
+
+    def test_validation_refuses_unix_socket_support_omission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".config"
+            config.write_text("CONFIG_MODULES=y\nCONFIG_BLOCK=y\nCONFIG_BLK_DEV_INITRD=y\n"
+                              "CONFIG_DEVTMPFS=y\nCONFIG_PRINTK=y\nCONFIG_RD_GZIP=y\n"
+                              "CONFIG_RD_ZSTD=y\nCONFIG_EXT4_FS=y\n")
+            report = hw.HardwareReport("arm64", "CPU", "/dev/x", "ext4",
+                                       modules=["test"], safe=True)
+            with self.assertRaisesRegex(RuntimeError, "CONFIG_UNIX"):
+                hw.verify_config(config, report)
 
     def test_report_explains_broad_retained_categories(self):
         report = hw.HardwareReport("x86_64", "CPU", refusal_reason="incomplete")
