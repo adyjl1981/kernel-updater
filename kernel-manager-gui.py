@@ -824,33 +824,44 @@ class KernelManagerApp:
         win.transient(self.root)
         win.grab_set()
         ttk.Label(win, text="Some Kernel Manager features need additional software.", font="TkHeadingFont").pack(anchor="w", padx=16, pady=(16, 4))
-        ttk.Label(win, text="Nothing will be installed unless you approve it. Optional items are not included in the Install Required action.", wraplength=780, justify="left").pack(anchor="w", padx=16, pady=(0, 10))
-        columns = ("status", "name", "needed", "missing")
+        ttk.Label(win, text="Install Missing Dependencies includes required and optional items with supported package mappings. Nothing will be installed unless you approve it.", wraplength=780, justify="left").pack(anchor="w", padx=16, pady=(0, 10))
+        # Reserve the footer before the expanding table: themed rows can consume
+        # the entire window if the footer is packed last.
+        actions = ttk.Frame(win)
+        actions.pack(side="bottom", fill="x", padx=16, pady=14)
+        packages = packages_to_install(results, manager, include_optional=True)
+        def install_missing():
+            if self._install_missing_dependencies(manager, results):
+                win.destroy()
+        install = ttk.Button(actions, text="Install Missing Dependencies", style="Accent.TButton",
+                             command=install_missing)
+        install.pack(side="left")
+        if not packages:
+            install.configure(state="disabled")
+        ttk.Button(actions, text="Close", command=win.destroy).pack(side="right")
+        ttk.Label(win, text=f"Package manager: {manager or 'unsupported'}. Items marked Manual installation cannot be installed automatically.",
+                  wraplength=780, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+        columns = ("status", "name", "needed", "missing", "installation")
         panel, tree = scrolled_tree(win, columns=columns, show="headings", height=13)
-        for column, label, width in (("status", "Importance", 95), ("name", "Dependency", 180), ("needed", "Needed for", 290), ("missing", "Missing", 230)):
+        for column, label, width in (("status", "Importance", 95), ("name", "Dependency", 180), ("needed", "Needed for", 290), ("missing", "Missing", 230), ("installation", "Installation", 160)):
             tree.heading(column, text=label)
             tree.column(column, width=width, anchor="w", stretch=column in ("needed", "missing"))
         panel.pack(fill="both", expand=True, padx=16)
         for item in missing:
             absent = ", ".join(item.missing_packages or item.missing_tools)
-            tree.insert("", "end", values=("Required" if item.dependency.required else "Optional", item.dependency.name, item.dependency.purpose, absent))
-        actions = ttk.Frame(win)
-        actions.pack(fill="x", padx=16, pady=14)
-        required_packages = packages_to_install(results, manager)
-        install = ttk.Button(actions, text="Install Required Dependencies", style="Accent.TButton", command=lambda: (win.destroy(), self._install_missing_dependencies(manager, results)))
-        install.pack(side="left")
-        if not required_packages:
-            install.configure(state="disabled")
-        ttk.Button(actions, text="Close", command=win.destroy).pack(side="right")
+            automatic = packages_to_install([item], manager, include_optional=True)
+            tree.insert("", "end", values=("Required" if item.dependency.required else "Optional", item.dependency.name, item.dependency.purpose, absent,
+                                          "Automatic" if automatic else "Manual installation"))
 
     def _install_missing_dependencies(self, manager, results):
-        packages = packages_to_install(results, manager)
+        packages = packages_to_install(results, manager, include_optional=True)
         if not packages:
-            messagebox.showinfo("Dependencies", "There are no installable required packages for this system.")
+            messagebox.showinfo("Dependencies", "There are no automatically installable packages for this system.")
             return
-        if not messagebox.askyesno("Install required dependencies", f"Install {len(packages)} required package(s) using {manager}?\n\n" + ", ".join(packages)):
+        if not messagebox.askyesno("Install missing dependencies", f"Install {len(packages)} package(s) for missing required and optional dependencies using {manager}?\n\n" + ", ".join(packages)):
             return
         self._run_operation("Installing dependencies", lambda log: install_packages(manager, packages, gui_env(), log, run_command), lambda success: self.on_check_dependencies(show_if_ready=True))
+        return True
 
     def _dependencies_available(self, keys):
         manager, results = check_dependencies()

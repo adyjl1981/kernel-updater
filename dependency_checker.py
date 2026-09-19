@@ -101,11 +101,16 @@ def check_dependencies(*, dependencies=DEPENDENCIES, which=shutil.which,
 
 
 def packages_to_install(results, manager, include_optional=False):
+    if manager not in ("apt", "dnf", "pacman"):
+        return []
     packages = []
     for result in results:
         if not result.missing or (not result.dependency.required and not include_optional):
             continue
-        packages.extend(result.missing_packages or result.dependency.packages_for(manager))
+        mapped = result.dependency.packages_for(manager)
+        if mapped:
+            packages.extend(package for package in (result.missing_packages or mapped)
+                            if package in mapped)
     return list(dict.fromkeys(packages))
 
 
