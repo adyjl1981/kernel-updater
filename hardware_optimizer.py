@@ -35,6 +35,8 @@ SAFETY_BUILTIN = {
     "RD_GZIP", "RD_BZIP2", "RD_LZMA", "RD_XZ", "RD_LZO", "RD_LZ4", "RD_ZSTD",
     "FW_LOADER", "ACPI", "PCI_MSI",
     "NETDEVICES", "ETHERNET", "WLAN", "WIRELESS", "NETFILTER",
+    # Boolean feature gates, even when their parent drivers are modules.
+    "MEDIA_USB_SUPPORT", "USB_SERIAL_GENERIC",
 }
 SAFETY_MODULES = {
     # USB hosts, hubs/storage and removable media
@@ -47,8 +49,8 @@ SAFETY_MODULES = {
     "HID_GENERIC", "USB_HID", "HID_MULTITOUCH", "INPUT_EVDEV",
     "KEYBOARD_ATKBD", "MOUSE_PS2", "BT", "BT_RFCOMM", "BT_BNEP", "BT_HIDP",
     "BT_HCIBTUSB", "BT_HCIUART", "SND", "SND_USB_AUDIO", "MEDIA_SUPPORT",
-    "MEDIA_USB_SUPPORT", "USB_VIDEO_CLASS", "USB_PRINTER", "USB_SERIAL",
-    "USB_SERIAL_GENERIC", "USB_SERIAL_FTDI_SIO", "USB_SERIAL_PL2303",
+    "USB_VIDEO_CLASS", "USB_PRINTER", "USB_SERIAL",
+    "USB_SERIAL_FTDI_SIO", "USB_SERIAL_PL2303",
     "USB_SERIAL_CP210X", "USB_ACM",
     # Normal desktop networking, Wi-Fi, printing and display connectors
     "CFG80211", "MAC80211", "RFKILL",

@@ -61,6 +61,80 @@ class HardwareScannerTests(unittest.TestCase):
 
 
 class ConfigSafetyTests(unittest.TestCase):
+    def test_usb_feature_gates_are_bool_with_modular_parents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".config"
+            config.write_text("CONFIG_MEDIA_USB_SUPPORT=m\nCONFIG_USB_SERIAL_GENERIC=m\n")
+            report = hw.HardwareReport("arm64", "CPU", "/dev/x", "ext4")
+            hw.update_config(config, report)
+            values = hw._config_values(config)
+            for symbol in ("MEDIA_USB_SUPPORT", "USB_SERIAL_GENERIC"):
+                self.assertEqual(values[symbol], "y")
+            for symbol in ("MEDIA_SUPPORT", "USB_SERIAL"):
+                self.assertEqual(values[symbol], "m")
+
+    def test_usb_bool_gates_survive_kconfig_and_respect_dependencies(self):
+        import os
+        import subprocess
+        candidates = list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf'))
+        if not candidates:
+            self.skipTest('Kconfig conf executable unavailable')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / '.config'
+            config.write_text('')
+            hw.update_config(config, hw.HardwareReport("arm64", "CPU", "/dev/x", "ext4"))
+            wanted = hw._config_values(config)
+            names = ('MODULES', 'USB', 'TTY', 'MEDIA_SUPPORT', 'USB_SERIAL',
+                     'MEDIA_USB_SUPPORT', 'USB_SERIAL_GENERIC')
+            correct = ''.join(f'CONFIG_{k}={wanted.get(k, "y")}\n' for k in names)
+            kconfig = root / 'Kconfig'
+            # Mirror the 7.2.6 types and enclosing parent conditions.
+            kconfig.write_text('''config MODULES
+ bool "Modules"
+ modules
+config USB
+ tristate "USB"
+config TTY
+ bool "TTY"
+config MEDIA_SUPPORT
+ tristate "Media"
+if USB && MEDIA_SUPPORT
+config MEDIA_USB_SUPPORT
+ bool "Media USB adapters"
+endif
+if USB
+config USB_SERIAL
+ tristate "USB serial"
+ depends on TTY
+if USB_SERIAL
+config USB_SERIAL_GENERIC
+ bool "Generic serial"
+endif
+endif
+''')
+            env = dict(os.environ, KCONFIG_CONFIG=str(config))
+            def resolve():
+                return subprocess.run([str(candidates[0]), '--olddefconfig', str(kconfig)],
+                                      cwd=root, env=env, check=True, capture_output=True, text=True)
+            config.write_text(correct.replace('CONFIG_MEDIA_USB_SUPPORT=y', 'CONFIG_MEDIA_USB_SUPPORT=m')
+                              .replace('CONFIG_USB_SERIAL_GENERIC=y', 'CONFIG_USB_SERIAL_GENERIC=m'))
+            rejected = resolve()
+            for symbol in ('MEDIA_USB_SUPPORT', 'USB_SERIAL_GENERIC'):
+                self.assertIn("symbol value 'm' invalid for " + symbol, rejected.stderr)
+                self.assertNotIn(symbol, hw._config_values(config))
+            config.write_text(correct)
+            self.assertEqual(resolve().stderr, '')
+            values = hw._config_values(config)
+            for symbol in ('MEDIA_USB_SUPPORT', 'USB_SERIAL_GENERIC'):
+                self.assertEqual(values[symbol], 'y')
+            for symbol in ('MEDIA_SUPPORT', 'USB_SERIAL'):
+                self.assertEqual(values[symbol], 'm')
+            config.write_text(correct.replace('CONFIG_USB=y', '# CONFIG_USB is not set'))
+            resolve()
+            for symbol in ('MEDIA_USB_SUPPORT', 'USB_SERIAL_GENERIC'):
+                self.assertNotIn(symbol, hw._config_values(config))
+
     def test_compatibility_and_boot_features_are_restored(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".config"
