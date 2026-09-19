@@ -43,6 +43,7 @@ from ubuntu_theme import apply_theme, scrolled_text, scrolled_tree
 from dependency_checker import (check_dependencies, initial_check_needed,
                                 install_packages, packages_to_install)
 from hardware_optimizer import Scanner, render_report
+import grub_menu
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
@@ -804,6 +805,71 @@ class KernelManagerApp:
             style="Accent.TButton",
         )
         self.tools_dependency_btn.pack(side="left")
+
+        menu = ttk.LabelFrame(frame, text="GRUB Boot Menu")
+        menu.pack(fill="x", padx=4, pady=8)
+        self.grub_menu_choice = tk.StringVar(value="")
+        for choice, description in (
+                ("hidden", "Do not normally display the GRUB menu during boot."),
+                ("5", "Display the GRUB boot menu for 5 seconds."),
+                ("15", "Display the GRUB boot menu for 15 seconds.")):
+            ttk.Radiobutton(menu, text=f"{grub_menu.LABELS[choice]} — {description}",
+                            variable=self.grub_menu_choice, value=choice).pack(anchor="w", padx=8, pady=4)
+        self.grub_menu_status = ttk.Label(menu, text="Reading GRUB settings…", wraplength=730)
+        self.grub_menu_status.pack(anchor="w", padx=8, pady=4)
+        ttk.Label(menu, text="Failed-boot recovery, firmware buttons and Ubuntu multi-boot detection may show the menu. "
+                  "These existing behaviours are preserved.", wraplength=730).pack(anchor="w", padx=8, pady=4)
+        actions = ttk.Frame(menu)
+        actions.pack(fill="x", padx=8, pady=8)
+        self.grub_menu_apply_btn = ttk.Button(actions, text="Apply GRUB Setting", command=self.on_apply_grub_menu)
+        self.grub_menu_apply_btn.pack(side="left")
+        ttk.Button(actions, text="Refresh GRUB Setting", command=self.refresh_grub_menu).pack(side="left", padx=8)
+        self.refresh_grub_menu()
+
+    def refresh_grub_menu(self):
+        self.grub_menu_original = None
+        self.grub_menu_choice.set("")
+        self.grub_menu_apply_btn.configure(state="disabled")
+        def read():
+            try:
+                grub_menu.check_overrides("/etc/default/grub.d")
+                original = GRUB_DEFAULTS_FILE.read_text()
+                return original, grub_menu.current_choice(original), None
+            except (OSError, ValueError) as error:
+                return None, None, str(error)
+        def done(result):
+            original, choice, error = result
+            self.grub_menu_original = original
+            self.grub_menu_choice.set(choice or "")
+            self.grub_menu_status.configure(text=error or (
+                "Current setting: " + grub_menu.LABELS[choice] if choice else
+                "Current configuration is custom. Select an option to replace its menu timing."))
+            self.grub_menu_apply_btn.configure(state="disabled" if error else "normal")
+        self._read_async("GRUB menu settings", read, done)
+
+    def on_apply_grub_menu(self):
+        original = self.grub_menu_original
+        choice = self.grub_menu_choice.get()
+        if original is None or choice not in grub_menu.CHOICES:
+            messagebox.showinfo("GRUB Boot Menu", "Refresh the configuration and select a menu option first.")
+            return
+        changes = grub_menu.preview(original, choice)
+        if not messagebox.askyesno("Apply GRUB Setting", f"Apply {grub_menu.LABELS[choice]}?\n\n{changes}\n\n"
+                                  "Back up /etc/default/grub and /boot/grub/grub.cfg, then run update-grub. "
+                                  "The default kernel and saved entry will be preserved."):
+            return
+        def work(log):
+            with tempfile.TemporaryDirectory(prefix="kernel-manager-grub-request-") as directory:
+                request = Path(directory) / "request.json"
+                request.write_text(json.dumps({"original": original, "choice": choice}))
+                run_command(["sudo", "-A", sys.executable, SCRIPT_DIR / "grub_menu.py", request], gui_env(), log)
+        def completed(success):
+            self.refresh_grub_menu()
+            if success:
+                messagebox.showinfo("GRUB Boot Menu", f"Applied: {grub_menu.LABELS[choice]}. GRUB was updated successfully.")
+            else:
+                messagebox.showerror("GRUB Boot Menu", "The GRUB setting could not be applied. See the operation log for the error, rollback status and backup paths.")
+        self._run_operation("Applying GRUB menu setting", work, completed)
 
     def on_check_dependencies(self, show_if_ready=True):
         def done(checked):
