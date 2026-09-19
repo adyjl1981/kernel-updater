@@ -565,6 +565,22 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertTrue((self.root / "system/boot/initrd.img-9.9.9-optimized").is_file())
         self.assertIn("9.9.9-optimized", (self.root / "system/boot/grub/grub.cfg").read_text())
 
+    def test_final_network_validation_failure_stops_before_compilation(self):
+        optimiser = self.root / "hardware_optimizer.py"
+        with optimiser.open("a") as output:
+            output.write(
+                "if action == 'verify':\n"
+                "    count = pathlib.Path('verify-count')\n"
+                "    n = int(count.read_text()) + 1 if count.exists() else 1\n"
+                "    count.write_text(str(n))\n"
+                "    if n == 2: raise SystemExit('detected network adapter lost')\n")
+        proc = self.run_script("build-custom-kernel.sh", "--jobs", "2", "--hardware-optimised")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Final boot/network validation failed", proc.stdout + proc.stderr)
+        self.assertFalse((self.tree / ".kernel-manager-complete").exists())
+        self.assertFalse(any(command[0] == "make" and any(arg.startswith("-j") for arg in command[1])
+                             for command in self.commands()))
+
     def test_explicit_localversion_overrides_optimised_default(self):
         self.build("--hardware-optimised", "--localversion", "-lab")
         args = (self.tree / ".kernel-manager-make-args").read_bytes().split(b"\0")

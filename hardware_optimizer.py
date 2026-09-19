@@ -34,6 +34,7 @@ SAFETY_BUILTIN = {
     # Keep every external-initramfs format which Ubuntu may select.
     "RD_GZIP", "RD_BZIP2", "RD_LZMA", "RD_XZ", "RD_LZO", "RD_LZ4", "RD_ZSTD",
     "FW_LOADER", "ACPI", "PCI_MSI",
+    "NETDEVICES", "ETHERNET", "WLAN", "WIRELESS", "NETFILTER",
 }
 SAFETY_MODULES = {
     # USB hosts, hubs/storage and removable media
@@ -50,8 +51,8 @@ SAFETY_MODULES = {
     "USB_SERIAL_GENERIC", "USB_SERIAL_FTDI_SIO", "USB_SERIAL_PL2303",
     "USB_SERIAL_CP210X", "USB_ACM",
     # Normal desktop networking, Wi-Fi, printing and display connectors
-    "NETDEVICES", "ETHERNET", "WLAN", "CFG80211", "MAC80211", "RFKILL",
-    "PACKET", "NETFILTER", "BRIDGE", "VLAN_8021Q", "MDNS_RESOLVER",
+    "CFG80211", "MAC80211", "RFKILL",
+    "PACKET", "BRIDGE", "VLAN_8021Q", "MDNS_RESOLVER",
     "USB_USBNET", "USB_NET_CDCETHER", "USB_NET_RNDIS_HOST", "PPP",
     "DRM", "DRM_KMS_HELPER", "DRM_DISPLAY_HELPER", "I2C", "I2C_ALGOBIT",
     "TYPEC", "USB_TYPEC", "THUNDERBOLT",
@@ -96,6 +97,7 @@ class HardwareReport:
     warnings: list[str] = field(default_factory=list)
     safe: bool = False
     refusal_reason: str = ""
+    network_devices: list[dict] = field(default_factory=list)
 
 
 class Scanner:
@@ -174,6 +176,47 @@ class Scanner:
             "USB controllers/devices": [x for x in pci if "USB" in x] + usb,
             "Other PCI/PCIe": pci,
         }
+        network_devices = []
+        for block in re.split(r"(?=^\S)", pci_raw, flags=re.M):
+            if not re.search(r"ethernet|network|wireless", block.split("\n")[0], re.I):
+                continue
+            drivers = re.findall(r"Kernel driver in use:\s*(\S+)", block)
+            candidates = re.findall(r"Kernel modules:\s*([^\n]+)", block)
+            drivers += [m.strip() for line in candidates for m in line.split(",")]
+            network_devices.append({"device": block.split("\n")[0],
+                                    "drivers": sorted(set(m.replace("-", "_") for m in drivers))})
+        # PCI class 02 covers network controllers even without lspci or a
+        # bound driver. Resolve modaliases read-only; never load a module.
+        for device in (self.sys / "bus/pci/devices").glob("*"):
+            try:
+                network = (device / "class").read_text().strip().startswith("0x02")
+            except OSError:
+                continue
+            if not network:
+                continue
+            drivers = []
+            bound = self._module_from_device(device)
+            if bound:
+                drivers.append(bound)
+            elif (device / "driver").exists():
+                drivers.append((device / "driver").resolve().name.replace("-", "_"))
+            try:
+                alias = (device / "modalias").read_text().strip()
+                drivers.extend(self.command(["modprobe", "--resolve-alias", alias], warnings).split())
+            except OSError:
+                pass
+            network_devices.append({"device": str(device),
+                                    "drivers": sorted(set(m.replace("-", "_") for m in drivers))})
+        # Includes USB adapters and built-in drivers via their bound net device.
+        for interface in (self.sys / "class/net").glob("*"):
+            device = interface / "device"
+            if not device.exists():
+                continue
+            driver = self._module_from_device(device)
+            if not driver and (device / "driver").exists():
+                driver = (device / "driver").resolve().name.replace("-", "_")
+            network_devices.append({"device": str(interface), "drivers": [driver] if driver else []})
+        modules.update(m for dev in network_devices for m in dev["drivers"])
         reason = ""
         if not root_source or not root_fs:
             reason = "The root storage source/filesystem could not be determined. Use Standard mode."
@@ -184,7 +227,7 @@ class Scanner:
         elif not modules:
             reason = "No loaded or sysfs-bound hardware drivers were found. Use Standard mode."
         return HardwareReport(arch, cpu, root_source, root_fs, boot_fs, pci, usb,
-                              sorted(modules), categories, warnings, not reason, reason)
+                              sorted(modules), categories, warnings, not reason, reason, network_devices)
 
 
 def render_report(r):
@@ -204,10 +247,81 @@ def render_report(r):
 
 def _config_values(path):
     text = Path(path).read_text()
-    return dict(re.findall(r"^CONFIG_([A-Z0-9_]+)=([^\n]+)$", text, re.M))
+    return dict(re.findall(r"^CONFIG_([A-Za-z0-9_]+)=([^\n]+)$", text, re.M))
 
 
-def update_config(path, report, baseline=None):
+def networking_baseline(baseline, source):
+    """Conservatively retain working networking and its referenced dependencies.
+
+    Use target-source symbol definitions, not a per-adapter name table. This is
+    intentionally an over-approximation, not a second Kconfig evaluator: only
+    working values are restored; real Kconfig resolves expressions afterwards.
+    """
+    working = _config_values(baseline)
+    source = Path(source)
+    files = list(source.rglob("Kconfig*"))
+    definitions = {}
+    retained = set()
+    for path in files:
+        text = path.read_text(errors="replace")
+        blocks = re.split(r"^\s*(?:menuconfig|config)\s+(\w+)[^\n]*\n", text, flags=re.M)
+        for name, body in zip(blocks[1::2], blocks[2::2]):
+            # Only dependency/select expressions, not unrelated neighbouring
+            # symbols or names mentioned in help text.
+            expressions = " ".join(re.findall(
+                r"^\s*(?:depends on|select|imply|default|def_bool|def_tristate)\s+([^\n]+)",
+                body, re.M))
+            definitions.setdefault(name, set()).update(
+                set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", expressions)) & working.keys())
+        relative = path.relative_to(source).as_posix()
+        if relative.startswith(("drivers/net/", "net/")):
+            retained.update(re.findall(r"^\s*(?:menuconfig|config)\s+(\w+)", text, re.M))
+            # Menu/if gates can be outside individual symbol definitions.
+            gates = " ".join(re.findall(r"^\s*if\s+([^\n]+)", text, re.M))
+            retained.update(set(re.findall(r"\b\w+\b", gates)) & working.keys())
+    if not retained:
+        raise RuntimeError("target networking Kconfig definitions are unavailable")
+    pending = list(retained)
+    while pending:
+        name = pending.pop()
+        if working.get(name) not in ("y", "m"):
+            continue
+        for dependency in definitions.get(name, set()) - retained:
+            retained.add(dependency)
+            pending.append(dependency)
+    return {k: working[k] for k in retained if working.get(k) in ("y", "m")}
+
+
+def network_driver_symbols(source):
+    """Resolve module output names through the target Kbuild files."""
+    result = {}
+    for path in Path(source).rglob("Makefile"):
+        text = path.read_text(errors="replace").replace("\\\n", " ")
+        for symbol, outputs in re.findall(
+                r"obj-\$\(CONFIG_(\w+)\)\s*[:+]?=([^\n]+)", text):
+            for output in re.findall(r"([\w-]+)\.o\b", outputs):
+                result.setdefault(output.replace("-", "_"), set()).add(symbol)
+    return result
+
+
+def verify_network(path, report, baseline, source):
+    values = _config_values(path)
+    expected = networking_baseline(baseline, source)
+    missing = sorted(k for k, v in expected.items()
+                     if values.get(k) not in ({"y"} if v == "y" else {"y", "m"}))
+    mapping = network_driver_symbols(source)
+    failures = []
+    for device in report.network_devices:
+        symbols = set().union(*(mapping.get(m, set()) for m in device["drivers"]))
+        if not symbols or not any(values.get(k) in ("y", "m") for k in symbols):
+            failures.append(device["device"] + " (drivers: " + ", ".join(device["drivers"]) + ")")
+    if missing or failures:
+        raise RuntimeError("network support rejected by Kconfig: " +
+                           ", ".join("CONFIG_" + k for k in missing) +
+                           "; detected adapters without verified support: " + "; ".join(failures))
+
+
+def update_config(path, report, baseline=None, source=None):
     """Apply required values without touching an installed kernel config."""
     config = Path(path)
     values = {x: "y" for x in SAFETY_BUILTIN}
@@ -218,13 +332,15 @@ def update_config(path, report, baseline=None):
             value = baseline_values.get(symbol)
             if value in ("y", "m"):
                 values[symbol] = value
+    if source and baseline:
+        values.update(networking_baseline(baseline, source))
     values[FS_CONFIG[report.root_filesystem]] = "y"
     for fs in report.boot_filesystems:
         if fs in FS_CONFIG: values[FS_CONFIG[fs]] = "y"
     lines = config.read_text().splitlines()
     wanted = {f"CONFIG_{k}": v for k, v in values.items()}
     output, seen = [], set()
-    pattern = re.compile(r"^(?:# )?(CONFIG_[A-Z0-9_]+)(?:=| is not set)")
+    pattern = re.compile(r"^(?:# )?(CONFIG_[A-Za-z0-9_]+)(?:=| is not set)")
     for line in lines:
         match = pattern.match(line)
         if match and match.group(1) in wanted:
@@ -234,9 +350,9 @@ def update_config(path, report, baseline=None):
     config.write_text("\n".join(output) + "\n")
 
 
-def verify_config(path, report, baseline=None):
+def verify_config(path, report, baseline=None, source=None):
     text = Path(path).read_text()
-    values = dict(re.findall(r"^(CONFIG_[A-Z0-9_]+)=([ym])$", text, re.M))
+    values = dict(re.findall(r"^(CONFIG_[A-Za-z0-9_]+)=([ym])$", text, re.M))
     required = {"CONFIG_MODULES", "CONFIG_BLOCK", "CONFIG_BLK_DEV_INITRD",
                 "CONFIG_DEVTMPFS", "CONFIG_UNIX", "CONFIG_PRINTK",
                 "CONFIG_RD_GZIP", "CONFIG_RD_ZSTD",
@@ -260,15 +376,24 @@ def verify_config(path, report, baseline=None):
     if missing:
         raise RuntimeError("critical settings were rejected by Kconfig: " + ", ".join(missing))
 
+    if source and baseline:
+        verify_network(path, report, baseline, source)
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("scan", "lsmod", "apply", "verify"))
     parser.add_argument("path", nargs="?")
     parser.add_argument("--baseline")
+    parser.add_argument("--source")
+    parser.add_argument("--report", help="Read a saved hardware scan")
+    parser.add_argument("--save-report", help="Save the hardware scan for all build stages")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    report = Scanner().scan()
+    report = (HardwareReport(**json.loads(Path(args.report).read_text()))
+              if args.report else Scanner().scan())
+    if args.save_report:
+        Path(args.save_report).write_text(json.dumps(asdict(report), indent=2))
     if args.action == "scan": print(json.dumps(asdict(report), indent=2) if args.json else render_report(report))
     elif not report.safe:
         raise SystemExit("Hardware optimisation refused: " + report.refusal_reason)
@@ -277,10 +402,10 @@ def main():
         for module in report.modules: print(f"{module} 0 0")
     elif args.action == "apply":
         if not args.path: parser.error("apply requires a config path")
-        update_config(args.path, report, args.baseline)
+        update_config(args.path, report, args.baseline, args.source)
     elif args.action == "verify":
         if not args.path: parser.error("verify requires a config path")
-        try: verify_config(args.path, report, args.baseline)
+        try: verify_config(args.path, report, args.baseline, args.source)
         except RuntimeError as exc: raise SystemExit(f"Hardware optimisation refused: {exc}")
 
 

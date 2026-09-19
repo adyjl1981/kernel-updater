@@ -346,10 +346,11 @@ make "${MAKE_ARGS[@]}" olddefconfig
 if $HARDWARE_OPTIMISED; then
   [[ -r "$SCRIPT_DIR/hardware_optimizer.py" ]] || err "Hardware scanner is missing. Use Standard mode."
   log "Scanning hardware and validating boot requirements"
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" scan || err "Hardware scan failed. Use Standard mode."
+  HARDWARE_REPORT="$PWD/.kernel-manager-hardware.json"
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" scan --save-report "$HARDWARE_REPORT" || err "Hardware scan failed. Use Standard mode."
   OPTIMISED_LSMOD=$(mktemp)
   trap 'rm -f -- "${OPTIMISED_LSMOD:-}"' EXIT
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" lsmod > "$OPTIMISED_LSMOD" || err "Hardware scan is incomplete. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" lsmod --report "$HARDWARE_REPORT" > "$OPTIMISED_LSMOD" || err "Hardware scan is incomplete. Use Standard mode."
   # localmodconfig removes non-module early-boot bools.  Retain a read-only
   # snapshot of the known-working config so the optimiser can restore them.
   BASELINE_CONFIG="$PWD/.kernel-manager-working-config"
@@ -357,9 +358,9 @@ if $HARDWARE_OPTIMISED; then
   log "Optimising configuration for detected and active drivers"
   LSMOD="$OPTIMISED_LSMOD" make "${MAKE_ARGS[@]}" localmodconfig
   # Always restore the broad peripheral safety set after localmodconfig.
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config --baseline "$BASELINE_CONFIG" || err "Could not apply the compatibility safety set. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Could not apply the compatibility safety set. Use Standard mode."
   make "${MAKE_ARGS[@]}" olddefconfig
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" || err "Critical boot settings did not survive configuration validation. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Boot/network settings did not survive configuration validation. Use Standard mode."
 fi
 
 # Ubuntu/Debian kernels point CONFIG_SYSTEM_TRUSTED_KEYS and
@@ -394,6 +395,11 @@ if $USE_LTO; then
   scripts/config --disable CONFIG_LTO_NONE
   make "${MAKE_ARGS[@]}" olddefconfig
   grep -qx 'CONFIG_LTO_CLANG_THIN=y' .config || err "ThinLTO is not supported by this configuration/toolchain."
+fi
+
+# Validate the same inventory after every configuration edit, including LTO.
+if $HARDWARE_OPTIMISED; then
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/network validation failed. Use Standard mode."
 fi
 
 # Invalidate completion before compiling and save arguments as data, not shell.

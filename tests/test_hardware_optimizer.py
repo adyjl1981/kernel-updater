@@ -117,6 +117,125 @@ class ConfigSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "BLK_DEV_INITRD"):
                 hw.verify_config(config, report)
 
+class NetworkRetentionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / 'drivers/net').mkdir(parents=True)
+        (self.root / 'drivers/net/Kconfig').write_text('''config NETDEVICES
+ bool "Network devices"
+config ETHERNET
+ bool "Ethernet"
+ depends on NETDEVICES
+config WLAN
+ bool "Wireless"
+ depends on NETDEVICES
+config OTHER_VENDOR_PCI
+ tristate "An arbitrary vendor adapter"
+ depends on WLAN && PCI
+ select MT792x_LIB
+config MT792x_LIB
+ tristate
+ select EXTERNAL_HELPER
+''')
+        (self.root / 'Kconfig').write_text('''config PCI
+ bool "PCI"
+config EXTERNAL_HELPER
+ tristate
+''')
+        (self.root / 'drivers/net/Makefile').write_text(
+            'obj-$(CONFIG_OTHER_VENDOR_PCI) += arbitrary-pci.o\n')
+        self.baseline = self.root / 'working.config'
+        self.baseline.write_text('CONFIG_NETDEVICES=y\nCONFIG_ETHERNET=y\n'
+                                 'CONFIG_WLAN=y\nCONFIG_PCI=y\n'
+                                 'CONFIG_OTHER_VENDOR_PCI=m\nCONFIG_MT792x_LIB=m\n'
+                                 'CONFIG_EXTERNAL_HELPER=m\n')
+        self.config = self.root / '.config'
+        self.config.write_text('# CONFIG_NETDEVICES is not set\n')
+        self.report = hw.HardwareReport('arm64', 'CPU', '/dev/x', 'ext4',
+            network_devices=[{'device': 'test PCI adapter', 'drivers': ['arbitrary_pci']}])
+
+    def test_working_network_dependency_chain_restored(self):
+        hw.update_config(self.config, self.report, self.baseline, self.root)
+        values = hw._config_values(self.config)
+        for symbol, value in hw._config_values(self.baseline).items():
+            self.assertEqual(values[symbol], value)
+        hw.verify_config(self.config, self.report, self.baseline, self.root)
+
+    def test_bool_safety_options_are_not_requested_as_modules(self):
+        hw.update_config(self.config, self.report)
+        values = hw._config_values(self.config)
+        for symbol in ('NETDEVICES', 'ETHERNET', 'WLAN', 'WIRELESS', 'NETFILTER'):
+            self.assertEqual(values[symbol], 'y')
+
+    def test_post_kconfig_driver_loss_refuses_build(self):
+        hw.update_config(self.config, self.report, self.baseline, self.root)
+        self.config.write_text(self.config.read_text().replace(
+            'CONFIG_OTHER_VENDOR_PCI=m', '# CONFIG_OTHER_VENDOR_PCI is not set'))
+        with self.assertRaisesRegex(RuntimeError, 'test PCI adapter'):
+            hw.verify_config(self.config, self.report, self.baseline, self.root)
+
+    def test_unresolved_detected_device_fails_closed(self):
+        hw.update_config(self.config, self.report, self.baseline, self.root)
+        self.report.network_devices[0]['drivers'] = []
+        with self.assertRaisesRegex(RuntimeError, 'test PCI adapter'):
+            hw.verify_config(self.config, self.report, self.baseline, self.root)
+
+    def test_dependency_demotion_is_rejected(self):
+        hw.update_config(self.config, self.report, self.baseline, self.root)
+        self.config.write_text(self.config.read_text().replace('CONFIG_PCI=y', 'CONFIG_PCI=m'))
+        with self.assertRaisesRegex(RuntimeError, 'CONFIG_PCI'):
+            hw.verify_config(self.config, self.report, self.baseline, self.root)
+
+    def test_actual_kconfig_rejects_old_module_value_for_bool(self):
+        import os
+        import subprocess
+        candidates = list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf'))
+        if not candidates:
+            self.skipTest('Kconfig conf executable unavailable')
+        kconfig = self.root / 'minimal.Kconfig'
+        kconfig.write_text('''config MODULES
+ bool "Modules"
+ modules
+ default y
+source "drivers/net/Kconfig"
+source "Kconfig"
+''')
+        self.config.write_text(self.baseline.read_text().replace('CONFIG_NETDEVICES=y', 'CONFIG_NETDEVICES=m'))
+        env = dict(os.environ, KCONFIG_CONFIG=str(self.config))
+        subprocess.run([str(candidates[0]), '--olddefconfig', str(kconfig)],
+                       cwd=self.root, env=env, check=True, capture_output=True)
+        self.assertNotIn('OTHER_VENDOR_PCI', hw._config_values(self.config))
+        hw.update_config(self.config, self.report, self.baseline, self.root)
+        subprocess.run([str(candidates[0]), '--olddefconfig', str(kconfig)],
+                       cwd=self.root, env=env, check=True, capture_output=True)
+        hw.verify_network(self.config, self.report, self.baseline, self.root)
+
+
+class NetworkInventoryTests(unittest.TestCase):
+    fixture = HardwareScannerTests.fixture
+
+    @mock.patch.object(hw.shutil, "which", return_value="/fixture/tool")
+    def test_unbound_pci_adapter_retains_candidate_module(self, unused):
+        scanner = self.fixture({
+            ("lspci", "-nnk"): "03:00.0 Network controller [0280]: Example [1234:5678]\n"
+                                  "\tKernel modules: arbitrary_pci\n",
+        }, with_devices=False)
+        report = scanner.scan()
+        self.assertEqual(report.network_devices[0]["drivers"], ["arbitrary_pci"])
+        self.assertIn("arbitrary_pci", report.modules)
+
+    @mock.patch.object(hw.shutil, "which", return_value="/fixture/tool")
+    def test_sysfs_network_device_without_driver_is_still_recorded(self, unused):
+        scanner = self.fixture({}, with_devices=False)
+        device = scanner.sys / 'bus/pci/devices/0000:03:00.0'
+        device.mkdir()
+        (device / 'class').write_text('0x028000')
+        report = scanner.scan()
+        self.assertEqual(len(report.network_devices), 1)
+        self.assertEqual(report.network_devices[0]['drivers'], [])
+
 
 if __name__ == "__main__":
     unittest.main()
