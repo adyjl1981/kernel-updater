@@ -566,6 +566,12 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn("9.9.9-optimized", (self.root / "system/boot/grub/grub.cfg").read_text())
 
     def test_final_network_validation_failure_stops_before_compilation(self):
+        self.assert_final_validation_stops("detected network adapter lost")
+
+    def test_final_container_validation_failure_stops_before_compilation(self):
+        self.assert_final_validation_stops("container support rejected: CONFIG_NETFILTER_XT_MATCH_ADDRTYPE, CONFIG_VETH")
+
+    def assert_final_validation_stops(self, reason):
         optimiser = self.root / "hardware_optimizer.py"
         with optimiser.open("a") as output:
             output.write(
@@ -573,10 +579,10 @@ class ShellIntegrationTests(unittest.TestCase):
                 "    count = pathlib.Path('verify-count')\n"
                 "    n = int(count.read_text()) + 1 if count.exists() else 1\n"
                 "    count.write_text(str(n))\n"
-                "    if n == 2: raise SystemExit('detected network adapter lost')\n")
+                f"    if n == 2: raise SystemExit({reason!r})\n")
         proc = self.run_script("build-custom-kernel.sh", "--jobs", "2", "--hardware-optimised")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("Final boot/network validation failed", proc.stdout + proc.stderr)
+        self.assertIn("Final boot/network/container validation failed", proc.stdout + proc.stderr)
         self.assertFalse((self.tree / ".kernel-manager-complete").exists())
         self.assertFalse(any(command[0] == "make" and any(arg.startswith("-j") for arg in command[1])
                              for command in self.commands()))

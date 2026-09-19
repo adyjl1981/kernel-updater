@@ -1,0 +1,513 @@
+# 7.2.6 symbol types; focused container dependency expressions.
+config ACPI
+ bool "ACPI"
+config BLK_CGROUP
+ bool "BLK_CGROUP"
+config BLK_CGROUP_IOCOST
+ bool "BLK_CGROUP_IOCOST"
+config BLK_CGROUP_IOPRIO
+ bool "BLK_CGROUP_IOPRIO"
+config BLK_CGROUP_PUNT_BIO
+ bool "BLK_CGROUP_PUNT_BIO"
+config BLK_CGROUP_RWSTAT
+ bool "BLK_CGROUP_RWSTAT"
+config BLK_DEV_DM
+ tristate "BLK_DEV_DM"
+config BLK_DEV_INITRD
+ bool "BLK_DEV_INITRD"
+config BLK_DEV_MD
+ tristate "BLK_DEV_MD"
+config BLK_DEV_NVME
+ tristate "BLK_DEV_NVME"
+config BLK_DEV_SD
+ tristate "BLK_DEV_SD"
+config BLK_DEV_SR
+ tristate "BLK_DEV_SR"
+config BLK_DEV_THROTTLING
+ bool "BLK_DEV_THROTTLING"
+config BLOCK
+ bool "BLOCK"
+config BPF
+ bool "BPF"
+config BPF_EVENTS
+ bool "BPF_EVENTS"
+config BPF_JIT
+ bool "BPF_JIT"
+config BPF_JIT_ALWAYS_ON
+ bool "BPF_JIT_ALWAYS_ON"
+config BPF_JIT_DEFAULT_ON
+ bool "BPF_JIT_DEFAULT_ON"
+config BPF_KPROBE_OVERRIDE
+ bool "BPF_KPROBE_OVERRIDE"
+config BPF_LSM
+ bool "BPF_LSM"
+config BPF_STREAM_PARSER
+ bool "BPF_STREAM_PARSER"
+config BPF_SYSCALL
+ bool "BPF_SYSCALL"
+config BPF_UNPRIV_DEFAULT_OFF
+ bool "BPF_UNPRIV_DEFAULT_OFF"
+config BRIDGE
+ tristate "BRIDGE"
+config BRIDGE_CFM
+ bool "BRIDGE_CFM"
+config BRIDGE_IGMP_SNOOPING
+ bool "BRIDGE_IGMP_SNOOPING"
+config BRIDGE_MRP
+ bool "BRIDGE_MRP"
+config BRIDGE_NETFILTER
+ tristate "BRIDGE_NETFILTER"
+ depends on BRIDGE && NETFILTER
+config BT
+ tristate "BT"
+config BT_BNEP
+ tristate "BT_BNEP"
+config BT_HCIBTUSB
+ tristate "BT_HCIBTUSB"
+config BT_HCIUART
+ tristate "BT_HCIUART"
+config BT_HIDP
+ tristate "BT_HIDP"
+config BT_RFCOMM
+ tristate "BT_RFCOMM"
+config CDROM
+ tristate "CDROM"
+config CFG80211
+ tristate "CFG80211"
+config CFS_BANDWIDTH
+ bool "CFS_BANDWIDTH"
+config CGROUPS
+ bool "CGROUPS"
+config CGROUP_BPF
+ bool "CGROUP_BPF"
+config CGROUP_CPUACCT
+ bool "CGROUP_CPUACCT"
+config CGROUP_DEVICE
+ bool "CGROUP_DEVICE"
+config CGROUP_DMEM
+ bool "CGROUP_DMEM"
+config CGROUP_FREEZER
+ bool "CGROUP_FREEZER"
+config CGROUP_HUGETLB
+ bool "CGROUP_HUGETLB"
+config CGROUP_MISC
+ bool "CGROUP_MISC"
+config CGROUP_NET_CLASSID
+ bool "CGROUP_NET_CLASSID"
+config CGROUP_NET_PRIO
+ bool "CGROUP_NET_PRIO"
+config CGROUP_PERF
+ bool "CGROUP_PERF"
+config CGROUP_PIDS
+ bool "CGROUP_PIDS"
+ depends on CGROUPS
+config CGROUP_RDMA
+ bool "CGROUP_RDMA"
+config CGROUP_SCHED
+ bool "CGROUP_SCHED"
+config CGROUP_WRITEBACK
+ bool "CGROUP_WRITEBACK"
+config CHR_DEV_SG
+ tristate "CHR_DEV_SG"
+config CPUSETS
+ bool "CPUSETS"
+config DEVTMPFS
+ bool "DEVTMPFS"
+config DEVTMPFS_MOUNT
+ bool "DEVTMPFS_MOUNT"
+config DM_CRYPT
+ tristate "DM_CRYPT"
+config DRM
+ tristate "DRM"
+config DRM_DISPLAY_HELPER
+ tristate "DRM_DISPLAY_HELPER"
+config DRM_KMS_HELPER
+ tristate "DRM_KMS_HELPER"
+config EFI
+ bool "EFI"
+config EFI_PARTITION
+ bool "EFI_PARTITION"
+config EFI_RUNTIME_MAP
+ bool "EFI_RUNTIME_MAP"
+config EFI_STUB
+ bool "EFI_STUB"
+config ETHERNET
+ bool "ETHERNET"
+config EXFAT_FS
+ tristate "EXFAT_FS"
+config EXT4_FS
+ tristate "EXT4_FS"
+config FAIR_GROUP_SCHED
+ bool "FAIR_GROUP_SCHED"
+config FAT_FS
+ tristate "FAT_FS"
+config FRAMEBUFFER_CONSOLE
+ bool "FRAMEBUFFER_CONSOLE"
+config FUSE_FS
+ tristate "FUSE_FS"
+config FW_LOADER
+ tristate "FW_LOADER"
+config HID
+ tristate "HID"
+config HID_GENERIC
+ tristate "HID_GENERIC"
+config HID_MULTITOUCH
+ tristate "HID_MULTITOUCH"
+config HOTPLUG_PCI
+ bool "HOTPLUG_PCI"
+config I2C
+ tristate "I2C"
+config I2C_ALGOBIT
+ tristate "I2C_ALGOBIT"
+config INET
+ bool "INET"
+config INPUT
+ tristate "INPUT"
+config INPUT_EVDEV
+ tristate "INPUT_EVDEV"
+config IP6_NF_FILTER
+ tristate "IP6_NF_FILTER"
+config IP6_NF_IPTABLES
+ tristate "IP6_NF_IPTABLES"
+config IP6_NF_IPTABLES_LEGACY
+ tristate "IP6_NF_IPTABLES_LEGACY"
+config IP6_NF_MANGLE
+ tristate "IP6_NF_MANGLE"
+config IP6_NF_NAT
+ tristate "IP6_NF_NAT"
+config IP6_NF_RAW
+ tristate "IP6_NF_RAW"
+config IPC_NS
+ bool "IPC_NS"
+config IPV6
+ bool "IPV6"
+config IP_NF_ARPTABLES
+ tristate "IP_NF_ARPTABLES"
+config IP_NF_FILTER
+ tristate "IP_NF_FILTER"
+config IP_NF_IPTABLES
+ tristate "IP_NF_IPTABLES"
+config IP_NF_IPTABLES_LEGACY
+ tristate "IP_NF_IPTABLES_LEGACY"
+config IP_NF_MANGLE
+ tristate "IP_NF_MANGLE"
+config IP_NF_NAT
+ tristate "IP_NF_NAT"
+config IP_NF_RAW
+ tristate "IP_NF_RAW"
+config ISO9660_FS
+ tristate "ISO9660_FS"
+config KEYBOARD_ATKBD
+ tristate "KEYBOARD_ATKBD"
+config KEYS
+ bool "KEYS"
+config MAC80211
+ tristate "MAC80211"
+config MD
+ bool "MD"
+config MEDIA_SUPPORT
+ tristate "MEDIA_SUPPORT"
+config MEDIA_USB_SUPPORT
+ bool "MEDIA_USB_SUPPORT"
+config MEMCG
+ bool "MEMCG"
+config MEMCG_V1
+ bool "MEMCG_V1"
+config MMC
+ tristate "MMC"
+config MMC_BLOCK
+ tristate "MMC_BLOCK"
+config MODULES
+ bool "MODULES"
+ modules
+config MOUSE_PS2
+ tristate "MOUSE_PS2"
+config MSDOS_PARTITION
+ bool "MSDOS_PARTITION"
+config NAMESPACES
+ bool "NAMESPACES"
+config NET
+ bool "NET"
+config NETDEVICES
+ bool "NETDEVICES"
+config NETFILTER
+ bool "NETFILTER"
+ depends on NET && INET
+config NETFILTER_ADVANCED
+ bool "NETFILTER_ADVANCED"
+config NETFILTER_BPF_LINK
+ bool "NETFILTER_BPF_LINK"
+config NETFILTER_EGRESS
+ bool "NETFILTER_EGRESS"
+config NETFILTER_FAMILY_ARP
+ bool "NETFILTER_FAMILY_ARP"
+config NETFILTER_FAMILY_BRIDGE
+ bool "NETFILTER_FAMILY_BRIDGE"
+config NETFILTER_INGRESS
+ bool "NETFILTER_INGRESS"
+config NETFILTER_NETLINK
+ bool "NETFILTER_NETLINK"
+config NETFILTER_SKIP_EGRESS
+ bool "NETFILTER_SKIP_EGRESS"
+config NETFILTER_XTABLES
+ tristate "NETFILTER_XTABLES"
+ depends on NETFILTER
+config NETFILTER_XTABLES_COMPAT
+ bool "NETFILTER_XTABLES_COMPAT"
+config NETFILTER_XTABLES_LEGACY
+ bool "NETFILTER_XTABLES_LEGACY"
+config NETFILTER_XT_MARK
+ tristate "NETFILTER_XT_MARK"
+config NETFILTER_XT_MATCH_ADDRTYPE
+ tristate "NETFILTER_XT_MATCH_ADDRTYPE"
+ depends on NETFILTER && NETFILTER_XTABLES
+config NETFILTER_XT_MATCH_COMMENT
+ tristate "NETFILTER_XT_MATCH_COMMENT"
+config NETFILTER_XT_MATCH_CONNTRACK
+ tristate "NETFILTER_XT_MATCH_CONNTRACK"
+config NETFILTER_XT_NAT
+ tristate "NETFILTER_XT_NAT"
+config NETFILTER_XT_TARGET_CHECKSUM
+ tristate "NETFILTER_XT_TARGET_CHECKSUM"
+config NETFILTER_XT_TARGET_MASQUERADE
+ tristate "NETFILTER_XT_TARGET_MASQUERADE"
+config NET_CORE
+ bool "NET_CORE"
+config NET_NS
+ bool "NET_NS"
+ depends on NAMESPACES
+config NFT_COMPAT
+ tristate "NFT_COMPAT"
+ depends on NF_TABLES && NETFILTER_XTABLES
+config NFT_CT
+ tristate "NFT_CT"
+config NFT_FIB
+ tristate "NFT_FIB"
+config NFT_FIB_IPV4
+ tristate "NFT_FIB_IPV4"
+config NFT_FIB_IPV6
+ tristate "NFT_FIB_IPV6"
+config NFT_MASQ
+ tristate "NFT_MASQ"
+config NFT_NAT
+ tristate "NFT_NAT"
+ depends on NF_TABLES && NF_NAT
+config NF_CONNTRACK
+ tristate "NF_CONNTRACK"
+ depends on NETFILTER
+config NF_CONNTRACK_EVENTS
+ bool "NF_CONNTRACK_EVENTS"
+config NF_CONNTRACK_LABELS
+ bool "NF_CONNTRACK_LABELS"
+config NF_CONNTRACK_MARK
+ bool "NF_CONNTRACK_MARK"
+config NF_CONNTRACK_SECMARK
+ bool "NF_CONNTRACK_SECMARK"
+config NF_CONNTRACK_TIMEOUT
+ bool "NF_CONNTRACK_TIMEOUT"
+config NF_CONNTRACK_TIMESTAMP
+ bool "NF_CONNTRACK_TIMESTAMP"
+config NF_CONNTRACK_ZONES
+ bool "NF_CONNTRACK_ZONES"
+config NF_CT_PROTO_SCTP
+ bool "NF_CT_PROTO_SCTP"
+config NF_DEFRAG_IPV4
+ tristate "NF_DEFRAG_IPV4"
+config NF_DEFRAG_IPV6
+ tristate "NF_DEFRAG_IPV6"
+config NF_NAT
+ tristate "NF_NAT"
+ depends on NETFILTER && NF_CONNTRACK
+config NF_NAT_MASQUERADE
+ bool "NF_NAT_MASQUERADE"
+config NF_TABLES
+ tristate "NF_TABLES"
+ depends on NETFILTER
+config NF_TABLES_ARP
+ bool "NF_TABLES_ARP"
+config NF_TABLES_INET
+ bool "NF_TABLES_INET"
+config NF_TABLES_IPV4
+ bool "NF_TABLES_IPV4"
+ depends on NF_TABLES
+config NF_TABLES_IPV6
+ bool "NF_TABLES_IPV6"
+ depends on NF_TABLES && IPV6
+config NF_TABLES_NETDEV
+ bool "NF_TABLES_NETDEV"
+config NLS
+ tristate "NLS"
+config NLS_CODEPAGE_437
+ tristate "NLS_CODEPAGE_437"
+config NLS_ISO8859_1
+ tristate "NLS_ISO8859_1"
+config NLS_UTF8
+ tristate "NLS_UTF8"
+config NTFS3_FS
+ tristate "NTFS3_FS"
+config NVME_CORE
+ tristate "NVME_CORE"
+config OVERLAY_FS
+ tristate "OVERLAY_FS"
+config PACKET
+ tristate "PACKET"
+config PARTITION_ADVANCED
+ bool "PARTITION_ADVANCED"
+config PCI
+ bool "PCI"
+config PCI_MSI
+ bool "PCI_MSI"
+config PID_NS
+ bool "PID_NS"
+config POSIX_MQUEUE
+ bool "POSIX_MQUEUE"
+config POSIX_MQUEUE_SYSCTL
+ bool "POSIX_MQUEUE_SYSCTL"
+config PPP
+ tristate "PPP"
+config PRINTK
+ bool "PRINTK"
+config PROC_FS
+ bool "PROC_FS"
+config RD_BZIP2
+ bool "RD_BZIP2"
+config RD_GZIP
+ bool "RD_GZIP"
+config RD_LZ4
+ bool "RD_LZ4"
+config RD_LZMA
+ bool "RD_LZMA"
+config RD_LZO
+ bool "RD_LZO"
+config RD_XZ
+ bool "RD_XZ"
+config RD_ZSTD
+ bool "RD_ZSTD"
+config RFKILL
+ tristate "RFKILL"
+config SATA_AHCI
+ tristate "SATA_AHCI"
+config SCSI
+ tristate "SCSI"
+config SECCOMP
+ bool "SECCOMP"
+config SECCOMP_FILTER
+ bool "SECCOMP_FILTER"
+ depends on SECCOMP
+config SECURITY_APPARMOR
+ bool "SECURITY_APPARMOR"
+config SECURITY_APPARMOR_EXPORT_BINARY
+ bool "SECURITY_APPARMOR_EXPORT_BINARY"
+config SECURITY_APPARMOR_HASH
+ bool "SECURITY_APPARMOR_HASH"
+config SECURITY_APPARMOR_HASH_DEFAULT
+ bool "SECURITY_APPARMOR_HASH_DEFAULT"
+config SECURITY_APPARMOR_INTROSPECT_POLICY
+ bool "SECURITY_APPARMOR_INTROSPECT_POLICY"
+config SECURITY_APPARMOR_PARANOID_LOAD
+ bool "SECURITY_APPARMOR_PARANOID_LOAD"
+config SECURITY_SELINUX
+ bool "SECURITY_SELINUX"
+config SECURITY_SELINUX_AVC_STATS
+ bool "SECURITY_SELINUX_AVC_STATS"
+config SECURITY_SELINUX_BOOTPARAM
+ bool "SECURITY_SELINUX_BOOTPARAM"
+config SECURITY_SELINUX_DEVELOP
+ bool "SECURITY_SELINUX_DEVELOP"
+config SMP
+ bool "SMP"
+config SND
+ tristate "SND"
+config SND_USB_AUDIO
+ tristate "SND_USB_AUDIO"
+config SOCK_CGROUP_DATA
+ bool "SOCK_CGROUP_DATA"
+config SYSFS
+ bool "SYSFS"
+config SYSVIPC
+ bool "SYSVIPC"
+config SYSVIPC_COMPAT
+ bool "SYSVIPC_COMPAT"
+config SYSVIPC_SYSCTL
+ bool "SYSVIPC_SYSCTL"
+config TIME_NS
+ bool "TIME_NS"
+config TMPFS
+ bool "TMPFS"
+config TMPFS_POSIX_ACL
+ bool "TMPFS_POSIX_ACL"
+config TYPEC
+ tristate "TYPEC"
+config UDF_FS
+ tristate "UDF_FS"
+config UNIX
+ bool "UNIX"
+config USB
+ tristate "USB"
+config USB_ACM
+ tristate "USB_ACM"
+config USB_EHCI_HCD
+ tristate "USB_EHCI_HCD"
+config USB_EHCI_PCI
+ tristate "USB_EHCI_PCI"
+config USB_HID
+ tristate "USB_HID"
+config USB_NET_CDCETHER
+ tristate "USB_NET_CDCETHER"
+config USB_NET_RNDIS_HOST
+ tristate "USB_NET_RNDIS_HOST"
+config USB_OHCI_HCD
+ tristate "USB_OHCI_HCD"
+config USB_PRINTER
+ tristate "USB_PRINTER"
+config USB_SERIAL
+ tristate "USB_SERIAL"
+config USB_SERIAL_CP210X
+ tristate "USB_SERIAL_CP210X"
+config USB_SERIAL_FTDI_SIO
+ tristate "USB_SERIAL_FTDI_SIO"
+config USB_SERIAL_GENERIC
+ bool "USB_SERIAL_GENERIC"
+config USB_SERIAL_PL2303
+ tristate "USB_SERIAL_PL2303"
+config USB_STORAGE
+ tristate "USB_STORAGE"
+config USB_SUPPORT
+ bool "USB_SUPPORT"
+config USB_UHCI_HCD
+ tristate "USB_UHCI_HCD"
+config USB_USBNET
+ tristate "USB_USBNET"
+config USB_VIDEO_CLASS
+ tristate "USB_VIDEO_CLASS"
+config USB_XHCI_HCD
+ tristate "USB_XHCI_HCD"
+config USB_XHCI_PCI
+ tristate "USB_XHCI_PCI"
+config USER_NS
+ bool "USER_NS"
+config UTS_NS
+ bool "UTS_NS"
+config VETH
+ tristate "VETH"
+ depends on NETDEVICES && NET_CORE
+config VFAT_FS
+ tristate "VFAT_FS"
+config VGA_CONSOLE
+ bool "VGA_CONSOLE"
+config VLAN_8021Q
+ tristate "VLAN_8021Q"
+config VT
+ bool "VT"
+config VT_CONSOLE
+ bool "VT_CONSOLE"
+config WIRELESS
+ bool "WIRELESS"
+config WLAN
+ bool "WLAN"
+config X86_64
+ bool "X86_64"
+config X86_IO_APIC
+ bool "X86_IO_APIC"
+config X86_LOCAL_APIC
+ bool "X86_LOCAL_APIC"

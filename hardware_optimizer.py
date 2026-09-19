@@ -85,6 +85,45 @@ BOOT_BASELINE_SYMBOLS = {
 }
 
 
+# Common local OCI/LXC runtime capability floor. Keep both firewall backends:
+# installed userspace can select iptables-nft or legacy independently of lsmod.
+# Values are chosen from the TARGET Kconfig types, never guessed from names.
+CONTAINER_REQUIRED = set("""
+MODULES NET INET IPV6 NETDEVICES NET_CORE UNIX PACKET
+NAMESPACES UTS_NS IPC_NS PID_NS NET_NS USER_NS
+CGROUPS CGROUP_SCHED FAIR_GROUP_SCHED CFS_BANDWIDTH CPUSETS MEMCG
+CGROUP_PIDS CGROUP_CPUACCT CGROUP_DEVICE CGROUP_FREEZER BLK_CGROUP
+CGROUP_BPF BPF BPF_SYSCALL KEYS
+SECCOMP SECCOMP_FILTER SYSVIPC POSIX_MQUEUE TMPFS TMPFS_POSIX_ACL
+OVERLAY_FS VETH BRIDGE BRIDGE_NETFILTER
+NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_NAT NF_NAT_MASQUERADE
+NF_TABLES NF_TABLES_INET NF_TABLES_IPV4 NF_TABLES_IPV6
+NFT_CT NFT_NAT NFT_MASQ NFT_COMPAT NFT_FIB NFT_FIB_IPV4 NFT_FIB_IPV6
+NETFILTER_XTABLES NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_MATCH_CONNTRACK
+NETFILTER_XT_MATCH_COMMENT NETFILTER_XT_MARK NETFILTER_XT_NAT
+NETFILTER_XT_TARGET_MASQUERADE NETFILTER_XT_TARGET_CHECKSUM
+IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT IP_NF_MANGLE IP_NF_RAW
+IP6_NF_IPTABLES IP6_NF_FILTER IP6_NF_NAT IP6_NF_MANGLE IP6_NF_RAW
+""".split())
+# These gates were introduced by newer kernels; require them when defined.
+CONTAINER_VERSION_GATES = {
+    "NETFILTER_XTABLES_LEGACY", "IP_NF_IPTABLES_LEGACY", "IP6_NF_IPTABLES_LEGACY",
+}
+CONTAINER_BASELINE_PATTERN = re.compile(
+    r"CGROUP|^MEMCG|^CPUSETS$|^CFS_BANDWIDTH$|^FAIR_GROUP_SCHED$|"
+    r"^NAMESPACES$|_NS$|^SECCOMP|^SYSVIPC|^POSIX_MQUEUE|^OVERLAY_FS|"
+    r"^BPF|^KEYS$|^BLK_DEV_THROTTLING$|^SECURITY_(APPARMOR|SELINUX)")
+RUNTIMES = {
+    "Docker": (("dockerd",), ("docker-ce", "docker.io", "moby-engine"),
+               ("docker.service", "docker.socket", "snap.docker.dockerd.service")),
+    "containerd": (("containerd",), ("containerd", "containerd.io"), ("containerd.service",)),
+    "Podman": (("podman",), ("podman",), ("podman.service", "podman.socket")),
+    "CRI-O": (("crio",), ("cri-o",), ("crio.service",)),
+    "LXC/LXD/Incus": (("lxc-start", "lxd", "incusd"), ("lxc", "lxd", "incus"),
+                      ("lxc.service", "lxd.service", "incus.service", "snap.lxd.daemon.service")),
+}
+
+
 @dataclass
 class HardwareReport:
     architecture: str
@@ -100,6 +139,7 @@ class HardwareReport:
     safe: bool = False
     refusal_reason: str = ""
     network_devices: list[dict] = field(default_factory=list)
+    container_runtimes: dict[str, list[str]] = field(default_factory=dict)
 
 
 class Scanner:
@@ -120,6 +160,25 @@ class Scanner:
         except Exception as exc:
             warnings.append(f"{args[0]} failed: {exc}")
             return ""
+
+    def detect_container_runtimes(self, warnings):
+        """Read-only evidence; never run/start a runtime or depend on loaded modules."""
+        packages = self.command(
+            ["dpkg-query", "-W", "-f=${binary:Package} ${db:Status-Status}\n"], warnings)
+        installed = {p[0].split(":")[0] for line in packages.splitlines()
+                     if len(p := line.split()) == 2 and p[1] == "installed"}
+        found = {}
+        for name, (executables, package_names, units) in RUNTIMES.items():
+            evidence = ["executable: " + exe for exe in executables if shutil.which(exe)]
+            evidence += ["package: " + pkg for pkg in package_names if pkg in installed]
+            for unit in units:
+                # --root reads enablement symlinks without requiring a system bus.
+                state = self.command(["systemctl", "--root=/", "is-enabled", unit], warnings).strip()
+                if state in ("enabled", "enabled-runtime", "linked", "linked-runtime"):
+                    evidence.append("unit: " + unit + " (" + state + ")")
+            if evidence:
+                found[name] = evidence
+        return found
 
     @staticmethod
     def _module_from_device(device):
@@ -229,13 +288,17 @@ class Scanner:
         elif not modules:
             reason = "No loaded or sysfs-bound hardware drivers were found. Use Standard mode."
         return HardwareReport(arch, cpu, root_source, root_fs, boot_fs, pci, usb,
-                              sorted(modules), categories, warnings, not reason, reason, network_devices)
+                              sorted(modules), categories, warnings, not reason, reason, network_devices,
+                              self.detect_container_runtimes(warnings))
 
 
 def render_report(r):
     lines = [f"CPU: {r.cpu}", f"Architecture: {r.architecture}",
              f"Root: {r.root_source or 'unknown'} ({r.root_filesystem or 'unknown'})",
              f"Detected driver modules: {', '.join(r.modules) or 'none'}", ""]
+    lines.append("Container runtimes: " + (", ".join(r.container_runtimes) or "none detected"))
+    if r.container_runtimes:
+        lines.append("  Retaining namespaces, cgroups, IPC, seccomp, overlayfs and container networking.")
     for name, items in r.categories.items():
         lines.append(f"{name}:" + ("\n  " + "\n  ".join(items) if items else " none detected"))
     lines += ["", "Compatibility retained:",
@@ -252,7 +315,7 @@ def _config_values(path):
     return dict(re.findall(r"^CONFIG_([A-Za-z0-9_]+)=([^\n]+)$", text, re.M))
 
 
-def networking_baseline(baseline, source):
+def networking_baseline(baseline, source, extra_symbols=()):
     """Conservatively retain working networking and its referenced dependencies.
 
     Use target-source symbol definitions, not a per-adapter name table. This is
@@ -263,7 +326,7 @@ def networking_baseline(baseline, source):
     source = Path(source)
     files = list(source.rglob("Kconfig*"))
     definitions = {}
-    retained = set()
+    retained = set(extra_symbols)
     for path in files:
         text = path.read_text(errors="replace")
         blocks = re.split(r"^\s*(?:menuconfig|config)\s+(\w+)[^\n]*\n", text, flags=re.M)
@@ -292,6 +355,46 @@ def networking_baseline(baseline, source):
             retained.add(dependency)
             pending.append(dependency)
     return {k: working[k] for k in retained if working.get(k) in ("y", "m")}
+
+
+def container_requirements(report, baseline, source):
+    if not report.container_runtimes:
+        return {}
+    if not baseline or not source:
+        raise RuntimeError("container preservation requires a baseline and target Kconfig source")
+    working = _config_values(baseline)
+    types = {}
+    for path in Path(source).rglob("Kconfig*"):
+        blocks = re.split(r"^\s*(?:menuconfig|config)\s+(\w+)[^\n]*\n",
+                          path.read_text(errors="replace"), flags=re.M)
+        for name, body in zip(blocks[1::2], blocks[2::2]):
+            kind = re.search(r"^\s*(bool|tristate|def_bool|def_tristate)\b", body, re.M)
+            if kind:
+                types[name] = kind[1].removeprefix("def_")
+    unavailable = CONTAINER_REQUIRED - types.keys()
+    if unavailable:
+        raise RuntimeError("container requirements unavailable in target Kconfig: " +
+                           ", ".join("CONFIG_" + k for k in sorted(unavailable)))
+    seeds = {k for k in working if CONTAINER_BASELINE_PATTERN.search(k)}
+    expected = networking_baseline(baseline, source, seeds)
+    for symbol in CONTAINER_REQUIRED | (CONTAINER_VERSION_GATES & types.keys()):
+        expected.setdefault(symbol, "y" if types[symbol] == "bool" else "m")
+    # A target release may change a formerly tristate feature to bool.
+    for symbol in expected:
+        if types.get(symbol) == "bool":
+            expected[symbol] = "y"
+    return expected
+
+
+def verify_containers(path, report, baseline, source):
+    expected = container_requirements(report, baseline, source)
+    values = _config_values(path)
+    missing = sorted(k for k, v in expected.items()
+                     if values.get(k) not in ({"y"} if v == "y" else {"y", "m"}))
+    if missing:
+        raise RuntimeError("container support rejected by Kconfig (" +
+                           ", ".join(report.container_runtimes) + "): " +
+                           ", ".join("CONFIG_" + k for k in missing))
 
 
 def network_driver_symbols(source):
@@ -336,6 +439,7 @@ def update_config(path, report, baseline=None, source=None):
                 values[symbol] = value
     if source and baseline:
         values.update(networking_baseline(baseline, source))
+    values.update(container_requirements(report, baseline, source))
     values[FS_CONFIG[report.root_filesystem]] = "y"
     for fs in report.boot_filesystems:
         if fs in FS_CONFIG: values[FS_CONFIG[fs]] = "y"
@@ -378,6 +482,7 @@ def verify_config(path, report, baseline=None, source=None):
     if missing:
         raise RuntimeError("critical settings were rejected by Kconfig: " + ", ".join(missing))
 
+    verify_containers(path, report, baseline, source)
     if source and baseline:
         verify_network(path, report, baseline, source)
 

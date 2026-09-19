@@ -360,7 +360,7 @@ if $HARDWARE_OPTIMISED; then
   # Always restore the broad peripheral safety set after localmodconfig.
   python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Could not apply the compatibility safety set. Use Standard mode."
   make "${MAKE_ARGS[@]}" olddefconfig
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Boot/network settings did not survive configuration validation. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Boot/network/container settings did not survive configuration validation. Use Standard mode."
 fi
 
 # Ubuntu/Debian kernels point CONFIG_SYSTEM_TRUSTED_KEYS and
@@ -399,7 +399,7 @@ fi
 
 # Validate the same inventory after every configuration edit, including LTO.
 if $HARDWARE_OPTIMISED; then
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/network validation failed. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/network/container validation failed. Use Standard mode."
 fi
 
 # Invalidate completion before compiling and save arguments as data, not shell.
