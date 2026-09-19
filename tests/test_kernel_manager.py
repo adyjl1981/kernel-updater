@@ -33,6 +33,59 @@ def result(stdout="", code=0):
     return subprocess.CompletedProcess([], code, stdout, "")
 
 
+class ApplicationIconTests(unittest.TestCase):
+    def test_icon_is_script_relative_and_default_for_toplevels(self):
+        root = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                os.chdir(directory)
+                with mock.patch.object(gui.tk, "PhotoImage") as photo:
+                    gui.set_application_icon(root)
+                    photo.assert_called_once_with(
+                        master=root, file=str(PROJECT / "kernel-manager-icon.png"))
+                    root.iconphoto.assert_called_once_with(True, photo.return_value)
+                    self.assertIs(root._application_icon, photo.return_value)
+            finally:
+                os.chdir(previous)
+
+    def test_bad_icon_does_not_prevent_startup(self):
+        for error in (gui.tk.TclError("missing or corrupt PNG"), OSError("unreadable")):
+            with self.subTest(error=error), \
+                 mock.patch.object(gui.tk, "Tk") as constructor, \
+                 mock.patch.object(gui.tk, "PhotoImage", side_effect=error), \
+                 mock.patch.object(gui, "gui_env"), \
+                 mock.patch.object(gui, "KernelManagerApp") as app, \
+                 contextlib.redirect_stderr(io.StringIO()) as stderr:
+                gui.main()
+                constructor.assert_called_once_with(className=gui.APP_CLASS)
+                app.assert_called_once_with(constructor.return_value)
+                constructor.return_value.mainloop.assert_called_once_with()
+                self.assertIn("Could not load Kernel Manager icon", stderr.getvalue())
+
+    def test_real_tk_icon_and_child_identity(self):
+        try:
+            root = gui.tk.Tk(className=gui.APP_CLASS)
+        except gui.tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        try:
+            gui.set_application_icon(root)
+            self.assertGreater(root._application_icon.width(), 0)
+            child = gui.tk.Toplevel(root, class_=gui.APP_CLASS)
+            root.update_idletasks()
+            self.assertEqual(root.winfo_class(), gui.APP_CLASS)
+            self.assertEqual(child.winfo_class(), gui.APP_CLASS)
+            if root.tk.call("tk", "windowingsystem") == "x11" and shutil.which("xprop"):
+                for window in (root, child):
+                    frame = window.tk.call("wm", "frame", window._w)
+                    props = subprocess.check_output(
+                        ["xprop", "-id", str(frame), "WM_CLASS", "_NET_WM_ICON"], text=True)
+                    self.assertIn('"KernelManager"', props)
+                    self.assertIn("_NET_WM_ICON(CARDINAL)", props)
+        finally:
+            root.destroy()
+
+
 class HelperTests(unittest.TestCase):
     def test_release_rejects_paths_and_options(self):
         for value in ("../etc", "-rf", "6.1/../../boot", "6.1;reboot", "6.1\n"):
@@ -897,8 +950,6 @@ class SigningTests(unittest.TestCase):
 class DesktopTests(unittest.TestCase):
     def test_launcher_escaping_and_xdg_directory(self):
         validator = shutil.which("desktop-file-validate")
-        if not validator:
-            self.skipTest("desktop-file-validate unavailable")
         with tempfile.TemporaryDirectory(prefix="kernel-desktop-test-") as tmp:
             root = Path(tmp)
             appdir = root / 'app with space $dollar `tick` "quote" %percent \\slash'
@@ -911,11 +962,15 @@ class DesktopTests(unittest.TestCase):
                 (bindir / name).symlink_to(shutil.which(name))
             proc = subprocess.run([str(bindir / "bash"), str(appdir / "install-desktop-entry.sh")],
                                   env=dict(os.environ, PATH=str(bindir), XDG_DATA_HOME=str(root / "data")),
-                                  capture_output=True, text=True)
+                                  cwd=root, capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             desktop = root / "data/applications/kernel-manager-gui.desktop"
-            checked = subprocess.run([validator, str(desktop)], capture_output=True, text=True)
-            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            if validator:
+                checked = subprocess.run([validator, str(desktop)], capture_output=True, text=True)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertIn(f"StartupWMClass={gui.APP_CLASS}\n", desktop.read_text())
+            escaped_icon = str(appdir / "kernel-manager-icon.png").replace("\\", "\\\\")
+            self.assertIn(f"Icon={escaped_icon}\n", desktop.read_text())
             self.assertIn("%%percent", desktop.read_text())
             self.assertIn("Exec=python3 ", desktop.read_text())
 

@@ -46,6 +46,9 @@ from hardware_optimizer import Scanner, render_report
 import grub_menu
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+# Keep this class in sync with StartupWMClass in install-desktop-entry.sh.
+APP_CLASS = "KernelManager"
+ICON_FILE = SCRIPT_DIR / "kernel-manager-icon.png"
 BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
 INSTALL_SCRIPT = SCRIPT_DIR / "install-custom-kernel.sh"
 ASKPASS_SCRIPT = SCRIPT_DIR / "askpass-gui.py"
@@ -58,6 +61,18 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 GRUB_DEFAULTS_FILE = Path("/etc/default/grub")
 
 VER_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
+
+
+def set_application_icon(root):
+    """Set the icon for the root and all existing/future Tk toplevels."""
+    try:
+        icon = tk.PhotoImage(master=root, file=str(ICON_FILE))
+        root.iconphoto(True, icon)
+        # Keep the Tk image alive for the lifetime of the application.
+        root._application_icon = icon
+    except (tk.TclError, OSError) as exc:
+        print(f"Could not load Kernel Manager icon {ICON_FILE}: {exc}",
+              file=sys.stderr)
 
 
 def running_kernel() -> str:
@@ -883,7 +898,7 @@ class KernelManagerApp:
 
     def _show_dependency_dialog(self, manager, results):
         missing = [item for item in results if item.missing]
-        win = tk.Toplevel(self.root)
+        win = tk.Toplevel(self.root, class_=APP_CLASS)
         win.title("Kernel Manager Dependencies")
         win.geometry("820x480")
         win.minsize(680, 360)
@@ -1126,7 +1141,7 @@ class KernelManagerApp:
     def on_show_grub_entries(self):
         def done(result):
             titles, error = result
-            win = tk.Toplevel(self.root)
+            win = tk.Toplevel(self.root, class_=APP_CLASS)
             win.title("Actual GRUB menu entries")
             win.geometry("560x300")
             ttk.Label(win, text="Menu paths found in grub.cfg:").pack(anchor="w", padx=8, pady=8)
@@ -1214,7 +1229,7 @@ class KernelManagerApp:
 
     def scan_hardware(self):
         def done(report):
-            win = tk.Toplevel(self.root)
+            win = tk.Toplevel(self.root, class_=APP_CLASS)
             win.title("Hardware Optimisation Scan")
             win.geometry("760x560")
             panel, output = scrolled_text(win, wrap="word", height=28)
@@ -1449,7 +1464,7 @@ class KernelManagerApp:
             messagebox.showinfo("Build logs", "Select a log file first.")
             return
         path = Path(sel[0])
-        win = tk.Toplevel(self.root)
+        win = tk.Toplevel(self.root, class_=APP_CLASS)
         win.title(path.name)
         win.geometry("800x600")
         win.transient(self.root)
@@ -1703,7 +1718,7 @@ def append_bounded(widget, text):
 class LogWindow:
     """Small popup with a live-updating text log, used for delete operations."""
     def __init__(self, parent, title):
-        self.win = tk.Toplevel(parent)
+        self.win = tk.Toplevel(parent, class_=APP_CLASS)
         self.win.title(title)
         self.win.geometry("680x380")
         self.win.transient(parent)
@@ -1749,10 +1764,11 @@ def main():
         sys.exit(1)
     try:
         gui_env()
-        root = tk.Tk()
+        root = tk.Tk(className=APP_CLASS)
     except (RuntimeError, tk.TclError) as e:
         print(f"Cannot start Kernel Manager: {e}", file=sys.stderr)
         sys.exit(1)
+    set_application_icon(root)
     app = KernelManagerApp(root)
     root.mainloop()
 
