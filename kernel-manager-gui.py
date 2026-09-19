@@ -44,10 +44,9 @@ from dependency_checker import (check_dependencies, initial_check_needed,
                                 install_packages, packages_to_install)
 from hardware_optimizer import Scanner, render_report
 import grub_menu
+from desktop_launcher import APP_CLASS, launcher_is_current, install_launcher
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# Keep this class in sync with StartupWMClass in install-desktop-entry.sh.
-APP_CLASS = "KernelManager"
 ICON_FILE = SCRIPT_DIR / "kernel-manager-icon.png"
 BUILD_SCRIPT = SCRIPT_DIR / "build-custom-kernel.sh"
 INSTALL_SCRIPT = SCRIPT_DIR / "install-custom-kernel.sh"
@@ -798,7 +797,52 @@ class KernelManagerApp:
         self.root.after(1000, self._update_resource_monitor)
         if initial_check_needed(self.presets):
             self.root.after(350, self._run_initial_dependency_check)
+        self.root.after(700, self._offer_desktop_launcher)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _offer_desktop_launcher(self):
+        if self.closed or launcher_is_current(SCRIPT_DIR):
+            return
+        # Avoid competing with another startup dialog for the modal grab.
+        if self.root.grab_current() is not None:
+            self.root.after(700, self._offer_desktop_launcher)
+            return
+        win = tk.Toplevel(self.root, class_=APP_CLASS)
+        win.title("Add Kernel Manager to Applications?")
+        win.transient(self.root)
+        win.resizable(False, False)
+        body = ttk.Frame(win, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Add Kernel Manager to Applications?",
+                  font="TkHeadingFont").pack(anchor="w", pady=(0, 12))
+        ttk.Label(body, text="Add Kernel Manager to Ubuntu's Applications menu using its proper icon. "
+                  "This installs a launcher for your user account only.",
+                  wraplength=440).pack(anchor="w")
+        actions = ttk.Frame(body)
+        actions.pack(fill="x", pady=(20, 0))
+
+        def install():
+            win.destroy()
+            self.on_install_desktop_launcher()
+
+        ttk.Button(actions, text="Install", style="Accent.TButton",
+                   command=install).pack(side="right")
+        cancel = ttk.Button(actions, text="Not Now", command=win.destroy)
+        cancel.pack(side="right", padx=8)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.bind("<Escape>", lambda event: win.destroy())
+        win.wait_visibility()
+        win.grab_set()
+        cancel.focus_set()
+
+    def on_install_desktop_launcher(self):
+        # The button or first-run Install choice is explicit user consent.
+        self._read_async(
+            "Desktop Launcher", lambda: install_launcher(SCRIPT_DIR),
+            lambda path: messagebox.showinfo(
+                "Desktop Launcher", "Kernel Manager is now available in Applications.",
+                parent=self.root),
+        )
 
     def _run_initial_dependency_check(self):
         save_presets({"dependency_check_completed": True})
@@ -820,6 +864,16 @@ class KernelManagerApp:
             style="Accent.TButton",
         )
         self.tools_dependency_btn.pack(side="left")
+
+        launcher = ttk.LabelFrame(frame, text="Applications Launcher")
+        launcher.pack(fill="x", padx=4, pady=8)
+        ttk.Label(launcher, text="Add or refresh the Applications launcher for this Kernel Manager location.",
+                  wraplength=730).pack(anchor="w", padx=8, pady=(8, 4))
+        self.tools_launcher_btn = ttk.Button(
+            launcher, text="Install / Update Desktop Launcher",
+            command=self.on_install_desktop_launcher,
+        )
+        self.tools_launcher_btn.pack(anchor="w", padx=8, pady=(4, 8))
 
         menu = ttk.LabelFrame(frame, text="GRUB Boot Menu")
         menu.pack(fill="x", padx=4, pady=8)

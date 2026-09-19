@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shlex
 import shutil
 import signal
@@ -75,12 +76,23 @@ class ApplicationIconTests(unittest.TestCase):
             root.update_idletasks()
             self.assertEqual(root.winfo_class(), gui.APP_CLASS)
             self.assertEqual(child.winfo_class(), gui.APP_CLASS)
-            if root.tk.call("tk", "windowingsystem") == "x11" and shutil.which("xprop"):
+            if (root.tk.call("tk", "windowingsystem") == "x11" and
+                    shutil.which("xprop") and shutil.which("xwininfo")):
                 for window in (root, child):
-                    frame = window.tk.call("wm", "frame", window._w)
+                    # wm frame may be GNOME's decoration window. Tk places
+                    # WM_CLASS and _NET_WM_ICON on its own wrapper, the immediate
+                    # X parent of the widget returned by winfo_id().
+                    tree = subprocess.check_output(
+                        ["xwininfo", "-id", hex(window.winfo_id()), "-tree"], text=True)
+                    wrapper = re.search(r"Parent window id: (0x[0-9a-fA-F]+)", tree)[1]
                     props = subprocess.check_output(
-                        ["xprop", "-id", str(frame), "WM_CLASS", "_NET_WM_ICON"], text=True)
-                    self.assertIn('"KernelManager"', props)
+                        ["xprop", "-id", wrapper, "WM_CLASS", "_NET_WM_ICON"], text=True)
+                    identity = re.search(r'WM_CLASS\(STRING\) = "([^"\n]+)", "([^"\n]+)"', props)
+                    self.assertIsNotNone(identity, props)
+                    self.assertEqual(identity[2], gui.APP_CLASS)
+                    if window is root:
+                        self.assertEqual(identity[1], "kernel-manager-gui")
+                        self.assertEqual(identity[1], gui.APP_CLASS.lower())
                     self.assertIn("_NET_WM_ICON(CARDINAL)", props)
         finally:
             root.destroy()

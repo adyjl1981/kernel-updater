@@ -41,7 +41,7 @@ Path(output).write_text(
     "Comment=Build, install, and manage custom Linux kernels\n"
     f"Exec=python3 {argument(app)}\nIcon={value(icon)}\n"
     "Terminal=false\nCategories=System;Settings;\nStartupNotify=true\n"
-    "StartupWMClass=KernelManager\n"
+    "StartupWMClass=Kernel-manager-gui\n"
 )
 PYTHON
 
