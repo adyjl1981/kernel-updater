@@ -361,7 +361,9 @@ class GuiStateTests(unittest.TestCase):
         app.ui_queue = queue.Queue()
         app.reads_pending = set()
         app.start_btn, app.stop_btn, app.install_btn = mock.Mock(), mock.Mock(), mock.Mock()
-        app.log_text = mock.Mock()
+        app.build_output = []
+        app.output_window = app.output_text = None
+        app.build_status_label = mock.Mock()
         app._append_log = mock.Mock()
         app._dependencies_available = mock.Mock(return_value=True)
         app.refresh_installed = mock.Mock()
@@ -510,6 +512,14 @@ elif name == "gpg":
             print("[GNUPG:] NO_PUBKEY 38DBBDC86092693E")
             sys.exit(2)
         print("[GNUPG:] VALIDSIG 647F28654894E3BD457199BE38DBBDC86092693E 0 0 0 0 0 0 0 0")
+elif name == "perl":
+    if args == ["scripts/kconfig/streamline_config.pl", "--localmodconfig", ".", "Kconfig"]:
+        if os.environ.get("KERNEL_TEST_PRUNE_FAIL"): sys.exit(2)
+        assert os.environ["SRCARCH"] in ("x86", "arm64")
+        assert pathlib.Path(os.environ["LSMOD"]).is_file()
+        print(pathlib.Path(".config").read_text(), end="")
+    else:
+        raise RuntimeError("Unexpected Perl command: " + str(args))
 elif name == "make":
     if "kernelrelease" in args:
         print(os.environ.get("KERNEL_TEST_RELEASE", version)); sys.exit(0)
@@ -750,6 +760,13 @@ class ShellIntegrationTests(unittest.TestCase):
             proc = self.run_script("build-custom-kernel.sh", **{flag: "1"})
             self.assertNotEqual(proc.returncode, 0)
             self.assertFalse((self.tree / ".kernel-manager-complete").exists())
+
+    def test_pruning_failure_stops_before_compilation(self):
+        proc = self.run_script("build-custom-kernel.sh", "--hardware-optimised", KERNEL_TEST_PRUNE_FAIL="1")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse((self.tree / ".kernel-manager-complete").exists())
+        self.assertFalse((self.tree / "vmlinux").exists())
+        self.assertFalse(any("-j" in arg for name, args in self.commands() if name == "make" for arg in args))
 
     def test_changed_artifact_blocks_install_before_sudo(self):
         self.build()
@@ -1014,6 +1031,7 @@ class AdditionalRegressionTests(unittest.TestCase):
             (tree / "include/config/kernel.release").write_text("7.2.6-optimized")
             app = gui.KernelManagerApp.__new__(gui.KernelManagerApp)
             app.cancel_thread = None
+            app.log_queue = queue.Queue()
             app.build_status_label = mock.Mock()
             app._finish_operation = mock.Mock()
             app._stream_finished("build", 0, str(tree))

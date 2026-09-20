@@ -356,7 +356,22 @@ if $HARDWARE_OPTIMISED; then
   BASELINE_CONFIG="$PWD/.kernel-manager-working-config"
   cp .config "$BASELINE_CONFIG"
   log "Optimising configuration for detected and active drivers"
-  LSMOD="$OPTIMISED_LSMOD" make "${MAKE_ARGS[@]}" localmodconfig
+  # The localmodconfig make target ends with interactive conf --oldconfig.
+  # Run its pruning step directly, then let native Kconfig assign NEW defaults
+  # without ever consulting stdin. Do not pipe yes into a pipefail pipeline.
+  KCONFIG_SRCARCH="$ARCH"
+  case "$ARCH" in
+    x86_64|i?86) KCONFIG_SRCARCH=x86 ;;
+    aarch64) KCONFIG_SRCARCH=arm64 ;;
+    arm*) KCONFIG_SRCARCH=arm ;;
+    ppc*) KCONFIG_SRCARCH=powerpc ;;
+    s390x) KCONFIG_SRCARCH=s390 ;;
+    riscv*) KCONFIG_SRCARCH=riscv ;;
+  esac
+  SRCARCH="$KCONFIG_SRCARCH" srctree=. objtree=. LSMOD="$OPTIMISED_LSMOD" \
+    perl scripts/kconfig/streamline_config.pl --localmodconfig . Kconfig > .kernel-manager-local.config
+  mv .kernel-manager-local.config .config
+  make "${MAKE_ARGS[@]}" olddefconfig < /dev/null
   # Always restore the broad peripheral safety set after localmodconfig.
   python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Could not apply the compatibility safety set. Use Standard mode."
   make "${MAKE_ARGS[@]}" olddefconfig

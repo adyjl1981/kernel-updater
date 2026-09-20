@@ -102,6 +102,19 @@ class ContainerConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'CONFIG_HELPER'):
             hw.verify_containers(self.config, self.report, self.baseline, self.root)
 
+    def test_remote_processor_name_service_and_hidden_fs_helper_are_not_container_features(self):
+        with (self.root / 'net/Kconfig').open('a') as stream:
+            stream.write('config RPMSG\n tristate\n'
+                         'config RPMSG_NS\n tristate "Remote processor name service"\n depends on RPMSG\n'
+                         'config BLK_CGROUP_UNUSED_FS_HELPER\n bool\n')
+        with self.baseline.open('a') as stream:
+            stream.write('CONFIG_RPMSG=m\nCONFIG_RPMSG_NS=m\nCONFIG_BLK_CGROUP_UNUSED_FS_HELPER=y\n')
+        required = hw.container_requirements(self.report, self.baseline, self.root)
+        self.assertNotIn('RPMSG_NS', required)
+        self.assertNotIn('RPMSG', required)
+        self.assertNotIn('BLK_CGROUP_UNUSED_FS_HELPER', required)
+        self.assertTrue(hw.CONTAINER_REQUIRED <= required.keys())
+
     def test_missing_source_or_baseline_fails_closed(self):
         for baseline, source in ((None, self.root), (self.baseline, None)):
             with self.assertRaisesRegex(RuntimeError, 'requires a baseline'):

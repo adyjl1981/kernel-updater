@@ -752,6 +752,9 @@ class KernelManagerApp:
         self.build_proc = None
         self.build_thread = None
         self.log_queue = queue.Queue(maxsize=2000)
+        self.build_output = []
+        self.output_window = None
+        self.output_text = None
         self.ui_queue = queue.Queue()
         self.busy = None
         self.operation_lock = None
@@ -1218,7 +1221,7 @@ class KernelManagerApp:
         self.build_mode_var = tk.StringVar(value=("hardware" if self.presets.get("build_mode") == "hardware" else "standard"))
         ttk.Radiobutton(mode, text="Standard", variable=self.build_mode_var, value="standard").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Radiobutton(mode, text="Hardware Optimised", variable=self.build_mode_var, value="hardware").grid(row=0, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(mode, text="Targets this computer while retaining common removable and future peripherals.").grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Label(mode, text="Targets this computer while retaining common removable and future peripherals.").grid(row=1, column=0, columnspan=3, sticky="w", padx=6)
         ttk.Button(mode, text="Scan Hardware…", command=self.scan_hardware).grid(row=0, column=2, padx=10)
 
         opts = ttk.LabelFrame(frame, text="Toolchain options")
@@ -1231,22 +1234,22 @@ class KernelManagerApp:
                         command=self._sync_lto_state).grid(row=0, column=1, sticky="w", padx=6, pady=4)
 
         self.lto_var = tk.BooleanVar(value=self.presets.get("lto") is True)
-        self.lto_check = ttk.Checkbutton(opts, text="Enable ThinLTO (Clang only, slow/RAM-heavy)",
+        self.lto_check = ttk.Checkbutton(opts, text="ThinLTO (Clang; slow/RAM-heavy)",
                                           variable=self.lto_var,
                                           state="normal" if self.toolchain_var.get() == "clang" else "disabled")
         self.lto_check.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=2)
         self._sync_lto_state()
 
         self.debug_var = tk.BooleanVar(value=self.presets.get("debug") is True)
-        ttk.Checkbutton(opts, text="Keep full debug info (needs 8GB+ RAM)",
-                         variable=self.debug_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(opts, text="Full debug info (8GB+ RAM)",
+                         variable=self.debug_var).grid(row=1, column=2, sticky="w", padx=6, pady=2)
 
         self.force_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opts, text="Force rebuild even if already up to date",
-                         variable=self.force_var).grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=2)
+                         variable=self.force_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=2)
 
         jobs_frame = ttk.Frame(opts)
-        jobs_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+        jobs_frame.grid(row=2, column=2, sticky="w", padx=6, pady=4)
         ttk.Label(jobs_frame, text="Parallel jobs:").pack(side="left")
         self.jobs_var = tk.StringVar(value=str(self.presets.get("jobs", os.cpu_count() or 2)))
         ttk.Spinbox(jobs_frame, from_=1, to=64, width=5, textvariable=self.jobs_var).pack(side="left", padx=4)
@@ -1268,11 +1271,11 @@ class KernelManagerApp:
         self.install_btn = ttk.Button(btn_frame, text="Install Now", command=self.start_install, state="disabled", style="Accent.TButton")
         self.install_btn.pack(side="left", padx=6)
 
-        ttk.Label(frame, text="Live build output:").pack(anchor="w", padx=4)
+        ttk.Button(btn_frame, text="View Build Output", command=self.view_build_output).pack(side="right")
         self.build_status_label = ttk.Label(frame, text="Ready", style="Status.TLabel")
         self.build_status_label.pack(fill="x", padx=4, pady=(0, 4))
-        log_frame, self.log_text = scrolled_text(frame, wrap="none", height=20)
-        log_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.build_status_label.bind("<Configure>",
+                                     lambda event: self.build_status_label.configure(wraplength=max(1, event.width - 16)))
 
     def _sync_lto_state(self):
         if self.toolchain_var.get() == "clang":
@@ -1292,8 +1295,70 @@ class KernelManagerApp:
             output.configure(state="disabled")
         self._read_async("Hardware scan", lambda: Scanner().scan(), done)
 
+    def _drain_build_output(self):
+        # Used before snapshots and before releasing the operation lock so a
+        # new build can never inherit queued lines from the previous build.
+        try:
+            while True:
+                self._append_log(self.log_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+    def _reset_build_output(self):
+        self.build_output.clear()
+        if self.output_text is not None:
+            self.output_text.configure(state="normal")
+            self.output_text.delete("1.0", "end")
+            self.output_text.configure(state="disabled")
+        self.build_status_label.configure(text="Starting build…")
+
+    def view_build_output(self):
+        self._drain_build_output()
+        if self.output_window is not None:
+            self.output_window.deiconify()
+            self.output_window.lift()
+            return
+        win = tk.Toplevel(self.root, class_=APP_CLASS)
+        self.output_window = win
+        win.title("Build Output — Kernel Manager")
+        win.geometry("800x450")
+        win.resizable(True, True)
+        win.protocol("WM_DELETE_WINDOW", self.close_build_output)
+        buttons = ttk.Frame(win, padding=8)
+        buttons.pack(side="bottom", fill="x")
+        ttk.Button(buttons, text="Copy All", command=self.copy_build_output).pack(side="left")
+        ttk.Button(buttons, text="Close", command=self.close_build_output).pack(side="right")
+        panel, self.output_text = scrolled_text(win, wrap="none", width=60, height=12)
+        panel.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        self.output_text.insert("1.0", "".join(self.build_output))
+        self.output_text.configure(state="disabled")
+        self.output_text.see("end")
+
+    def close_build_output(self):
+        if self.output_window is not None:
+            self.output_window.destroy()
+            self.output_window = None
+            self.output_text = None
+
+    def copy_build_output(self):
+        self._drain_build_output()
+        self.root.clipboard_clear()
+        self.root.clipboard_append("".join(self.build_output))
+
     def _append_log(self, text: str):
-        append_bounded(self.log_text, text)
+        self.build_output.append(text)
+        widget = self.output_text
+        if widget is not None:
+            # A tolerance of one displayed line follows near-bottom readers,
+            # without treating a large fraction of a long log as "near".
+            _, last = widget.yview()
+            tolerance = 1 / max(1, int(widget.index("end-1c").split(".")[0]))
+            follow = last >= 1.0 - tolerance
+            widget.configure(state="normal")
+            widget.insert("end", text)
+            widget.configure(state="disabled")
+            if follow:
+                widget.see("end")
 
     def _update_resource_monitor(self):
         try:
@@ -1374,7 +1439,7 @@ class KernelManagerApp:
             return
         if kind == "build":
             self.built_kernel_dir = None
-            self.log_text.delete("1.0", "end")
+            self._reset_build_output()
             save_presets({"toolchain": self.toolchain_var.get(), "lto": self.lto_var.get(),
                           "debug": self.debug_var.get(), "jobs": self.jobs_var.get(),
                           "build_mode": self.build_mode_var.get()})
@@ -1393,7 +1458,7 @@ class KernelManagerApp:
                 self.build_proc = proc
                 with proc.stdout:
                     for line in proc.stdout:
-                        self.log_queue.put(line[:65536])
+                        self.log_queue.put(line)
                         if kind == "build" and line.startswith("KERNEL_MANAGER_STATUS="):
                             status = line.rstrip("\n").split("=", 1)[1]
                             self._dispatch(lambda value=status: self.build_status_label.configure(text=value))
@@ -1429,6 +1494,7 @@ class KernelManagerApp:
             self.stop_btn.configure(state="normal")
 
     def _stream_finished(self, kind, rc, built_dir):
+        self._drain_build_output()
         if self.cancel_thread is not None:
             if self.cancel_thread.is_alive():
                 self.root.after(100, lambda: self._stream_finished(kind, rc, built_dir))
@@ -1444,7 +1510,7 @@ class KernelManagerApp:
                 except (OSError, RuntimeError, TypeError):
                     status = "Build completed"
             else:
-                status = "Build stopped: see the verification/build details above"
+                status = "Build stopped: select View Build Output for details"
             self.build_status_label.configure(text=status)
         elif rc == 0:
             self.built_kernel_dir = None

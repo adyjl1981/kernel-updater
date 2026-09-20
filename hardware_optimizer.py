@@ -111,7 +111,7 @@ CONTAINER_VERSION_GATES = {
 }
 CONTAINER_BASELINE_PATTERN = re.compile(
     r"CGROUP|^MEMCG|^CPUSETS$|^CFS_BANDWIDTH$|^FAIR_GROUP_SCHED$|"
-    r"^NAMESPACES$|_NS$|^SECCOMP|^SYSVIPC|^POSIX_MQUEUE|^OVERLAY_FS|"
+    r"^NAMESPACES$|^(UTS|IPC|PID|NET|USER|TIME)_NS$|^SECCOMP|^SYSVIPC|^POSIX_MQUEUE|^OVERLAY_FS|"
     r"^BPF|^KEYS$|^BLK_DEV_THROTTLING$|^SECURITY_(APPARMOR|SELINUX)")
 RUNTIMES = {
     "Docker": (("dockerd",), ("docker-ce", "docker.io", "moby-engine"),
@@ -315,46 +315,125 @@ def _config_values(path):
     return dict(re.findall(r"^CONFIG_([A-Za-z0-9_]+)=([^\n]+)$", text, re.M))
 
 
-def networking_baseline(baseline, source, extra_symbols=()):
-    """Conservatively retain working networking and its referenced dependencies.
+def _positive_conjunction(expression):
+    expression = expression.split("#", 1)[0].strip()
+    if re.fullmatch(r"\w+(?:\s*&&\s*\w+)*", expression):
+        return {term.strip() for term in expression.split("&&")} - {"y", "m", "n"}
+    return set()
 
-    Use target-source symbol definitions, not a per-adapter name table. This is
-    intentionally an over-approximation, not a second Kconfig evaluator: only
-    working values are restored; real Kconfig resolves expressions afterwards.
+
+def kconfig_capabilities(source, working):
+    """Read types and *unconditional* capability edges, not an expression graph.
+
+    Kconfig remains the authority for alternatives, negation, conditional
+    selects, defaults and implications. Merely mentioning a symbol in one of
+    those expressions does not make it a required capability. In particular,
+    an optional dependency such as FOO || !FOO must not retain FOO.
     """
-    working = _config_values(baseline)
-    source = Path(source)
-    files = list(source.rglob("Kconfig*"))
-    definitions = {}
-    retained = set(extra_symbols)
-    for path in files:
-        text = path.read_text(errors="replace")
+    architectures = {"X86": "x86", "X86_64": "x86", "X86_32": "x86",
+                     "ARM64": "arm64", "ARM": "arm", "PPC": "powerpc",
+                     "S390": "s390", "RISCV": "riscv", "MIPS": "mips",
+                     "SPARC": "sparc", "LOONGARCH": "loongarch"}
+    active_arches = {arch for symbol, arch in architectures.items() if working.get(symbol) == "y"}
+    types, dependencies, network, prompted = {}, {}, set(), set()
+    for path in sorted(Path(source).rglob("Kconfig*")):
+        relative = path.relative_to(source)
+        if not path.is_file() or (relative.parts[0] == "arch" and len(relative.parts) > 2 and relative.parts[1] not in active_arches):
+            continue
+        text = path.read_text(errors="replace").replace("\\\n", " ")
+        # Enclosing if gates are required by every symbol within that scope.
+        # Track them separately, never as properties of the preceding config.
+        scopes = []
+        for line in text.splitlines():
+            if match := re.match(r"^if\s+(.+)", line):
+                scopes.append(_positive_conjunction(match[1]))
+            elif re.match(r"^endif\b", line):
+                if scopes:
+                    scopes.pop()
+            elif match := re.match(r"^\s*(?:menuconfig|config)\s+(\w+)", line):
+                dependencies.setdefault(match[1], set()).update(set().union(*scopes))
         blocks = re.split(r"^\s*(?:menuconfig|config)\s+(\w+)[^\n]*\n", text, flags=re.M)
         for name, body in zip(blocks[1::2], blocks[2::2]):
-            # Only dependency/select expressions, not unrelated neighbouring
-            # symbols or names mentioned in help text.
-            expressions = " ".join(re.findall(
-                r"^\s*(?:depends on|select|imply|default|def_bool|def_tristate)\s+([^\n]+)",
-                body, re.M))
-            definitions.setdefault(name, set()).update(
-                set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", expressions)) & working.keys())
-        relative = path.relative_to(source).as_posix()
-        if relative.startswith(("drivers/net/", "net/")):
-            retained.update(re.findall(r"^\s*(?:menuconfig|config)\s+(\w+)", text, re.M))
-            # Menu/if gates can be outside individual symbol definitions.
-            gates = " ".join(re.findall(r"^\s*if\s+([^\n]+)", text, re.M))
-            retained.update(set(re.findall(r"\b\w+\b", gates)) & working.keys())
-    if not retained:
-        raise RuntimeError("target networking Kconfig definitions are unavailable")
-    pending = list(retained)
+            # Do not attribute properties of the next menu/choice to the
+            # preceding symbol (the old block regex did exactly that).
+            body = re.split(r"^\s*(?:if|endif|menu|endmenu|choice|endchoice|source|rsource|comment)\b",
+                            body, maxsplit=1, flags=re.M)[0]
+            body = re.split(r"^\s*(?:help|---help---)\s*$", body, maxsplit=1, flags=re.M)[0]
+            kind = re.search(r"^\s*(bool|tristate|def_bool|def_tristate)\b", body, re.M)
+            if kind:
+                types[name] = kind[1].removeprefix("def_")
+            if re.search(r'^[ \t]*(?:(?:bool|tristate)[ \t]+"|prompt[ \t]+")', body, re.M):
+                prompted.add(name)
+            edges = dependencies.setdefault(name, set())
+            for expr in re.findall(r"^\s*depends on\s+([^\n]+)", body, re.M):
+                # Only positive conjuncts are universally necessary. Complex
+                # expressions are resolved by native olddefconfig, then the
+                # requested top-level capability is checked below.
+                edges.update(_positive_conjunction(expr))
+            edges.update(re.findall(r"^\s*select\s+(\w+)\s*(?:#[^\n]*)?$", body, re.M))
+            if path.relative_to(source).as_posix().startswith(("drivers/net/", "net/")):
+                network.add(name)
+    return types, dependencies, network, prompted
+
+
+def capability_closure(baseline, source, seeds, catalog=None):
+    """Required seeds plus indisputable dependencies; preserve target types.
+
+    Validating a requested capability *after* native Kconfig processing also
+    validates its full dependency expression, without pinning every possible
+    alternative or optional feature to its old distribution-kernel value.
+    """
+    working = _config_values(baseline)
+    types, dependencies, _, _ = catalog or kconfig_capabilities(source, working)
+    expected = {}
+    seeds = set(seeds)
+    pending = list(seeds)
     while pending:
         name = pending.pop()
-        if working.get(name) not in ("y", "m"):
+        if name in expected:
             continue
-        for dependency in definitions.get(name, set()) - retained:
-            retained.add(dependency)
-            pending.append(dependency)
-    return {k: working[k] for k in retained if working.get(k) in ("y", "m")}
+        if name not in types:
+            raise RuntimeError("required capability unavailable in target Kconfig: CONFIG_" + name)
+        expected[name] = "y" if types[name] == "bool" else (working.get(name, "m") if name in seeds else "m")
+        if expected[name] not in ("y", "m"):
+            expected[name] = "m"
+        pending.extend(dependencies.get(name, set()) - expected.keys())
+    return expected
+
+
+def networking_baseline(baseline, source, extra_symbols=()):
+    """Retain deliberate network compatibility capabilities, not all of net/."""
+    working = _config_values(baseline)
+    catalog = kconfig_capabilities(source, working)
+    types, _, network, _ = catalog
+    if not network:
+        raise RuntimeError("target networking Kconfig definitions are unavailable")
+    seeds = (SAFETY_BUILTIN | SAFETY_MODULES) & network & types.keys()
+    return capability_closure(baseline, source, seeds | set(extra_symbols), catalog)
+
+
+def network_requirements(report, baseline, source):
+    mapping = network_driver_symbols(source)
+    working = _config_values(baseline)
+    seeds = set()
+    for device in report.network_devices:
+        candidates = set().union(*(mapping.get(m, set()) for m in device["drivers"]))
+        # Module aliases can have several providers; retain the known-working
+        # provider when available, not every driver with a similar name.
+        selected = {k for k in candidates if working.get(k) in ("y", "m")}
+        if not selected and len(candidates) == 1:
+            selected = candidates
+        if not selected:
+            raise RuntimeError("detected adapter without verified target driver mapping: " +
+                               device["device"] + " (drivers: " + ", ".join(device["drivers"]) + ")")
+        seeds.update(selected)
+        # ath9k.o alone does not imply a PCI transport: the bus object is a
+        # separate bool within that composite module. AR9287 needs this gate.
+        pci_device = (device.get("bus") == "pci" or "/bus/pci/" in device["device"] or
+                      re.match(r"(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\b", device["device"]))
+        if "ath9k" in device["drivers"] and pci_device:
+            seeds.add("ATH9K_PCI")
+    return networking_baseline(baseline, source, seeds)
 
 
 def container_requirements(report, baseline, source):
@@ -363,27 +442,18 @@ def container_requirements(report, baseline, source):
     if not baseline or not source:
         raise RuntimeError("container preservation requires a baseline and target Kconfig source")
     working = _config_values(baseline)
-    types = {}
-    for path in Path(source).rglob("Kconfig*"):
-        blocks = re.split(r"^\s*(?:menuconfig|config)\s+(\w+)[^\n]*\n",
-                          path.read_text(errors="replace"), flags=re.M)
-        for name, body in zip(blocks[1::2], blocks[2::2]):
-            kind = re.search(r"^\s*(bool|tristate|def_bool|def_tristate)\b", body, re.M)
-            if kind:
-                types[name] = kind[1].removeprefix("def_")
+    catalog = kconfig_capabilities(source, working)
+    types, _, _, prompted = catalog
     unavailable = CONTAINER_REQUIRED - types.keys()
     if unavailable:
         raise RuntimeError("container requirements unavailable in target Kconfig: " +
                            ", ".join("CONFIG_" + k for k in sorted(unavailable)))
-    seeds = {k for k in working if CONTAINER_BASELINE_PATTERN.search(k)}
-    expected = networking_baseline(baseline, source, seeds)
-    for symbol in CONTAINER_REQUIRED | (CONTAINER_VERSION_GATES & types.keys()):
-        expected.setdefault(symbol, "y" if types[symbol] == "bool" else "m")
-    # A target release may change a formerly tristate feature to bool.
-    for symbol in expected:
-        if types.get(symbol) == "bool":
-            expected[symbol] = "y"
-    return expected
+    # Preserve chosen container features, not hidden implementation helpers
+    # whose only consumer (e.g. Btrfs's BLK_CGROUP_PUNT_BIO) was pruned.
+    seeds = {k for k in working if k in prompted and working[k] in ("y", "m")
+             and CONTAINER_BASELINE_PATTERN.search(k)}
+    seeds.update(CONTAINER_REQUIRED | (CONTAINER_VERSION_GATES & types.keys()))
+    return capability_closure(baseline, source, seeds, catalog)
 
 
 def verify_containers(path, report, baseline, source):
@@ -400,7 +470,7 @@ def verify_containers(path, report, baseline, source):
 def network_driver_symbols(source):
     """Resolve module output names through the target Kbuild files."""
     result = {}
-    for path in Path(source).rglob("Makefile"):
+    for path in (Path(source) / "drivers/net").rglob("Makefile"):
         text = path.read_text(errors="replace").replace("\\\n", " ")
         for symbol, outputs in re.findall(
                 r"obj-\$\(CONFIG_(\w+)\)\s*[:+]?=([^\n]+)", text):
@@ -411,7 +481,7 @@ def network_driver_symbols(source):
 
 def verify_network(path, report, baseline, source):
     values = _config_values(path)
-    expected = networking_baseline(baseline, source)
+    expected = network_requirements(report, baseline, source)
     missing = sorted(k for k, v in expected.items()
                      if values.get(k) not in ({"y"} if v == "y" else {"y", "m"}))
     mapping = network_driver_symbols(source)
@@ -421,9 +491,12 @@ def verify_network(path, report, baseline, source):
         if not symbols or not any(values.get(k) in ("y", "m") for k in symbols):
             failures.append(device["device"] + " (drivers: " + ", ".join(device["drivers"]) + ")")
     if missing or failures:
-        raise RuntimeError("network support rejected by Kconfig: " +
-                           ", ".join("CONFIG_" + k for k in missing) +
-                           "; detected adapters without verified support: " + "; ".join(failures))
+        details = []
+        if missing:
+            details.append("required capabilities: " + ", ".join("CONFIG_" + k for k in missing))
+        if failures:
+            details.append("detected adapters without verified support: " + "; ".join(failures))
+        raise RuntimeError("network support rejected by Kconfig: " + "; ".join(details))
 
 
 def update_config(path, report, baseline=None, source=None):
@@ -438,7 +511,10 @@ def update_config(path, report, baseline=None, source=None):
             if value in ("y", "m"):
                 values[symbol] = value
     if source and baseline:
-        values.update(networking_baseline(baseline, source))
+        network = network_requirements(report, baseline, source)
+        # Baseline values are useful configuration inputs, but a helper which
+        # Kconfig can legitimately demote to m is not a built-in requirement.
+        values.update({k: "y" if baseline_values.get(k) == "y" else v for k, v in network.items()})
     values.update(container_requirements(report, baseline, source))
     values[FS_CONFIG[report.root_filesystem]] = "y"
     for fs in report.boot_filesystems:

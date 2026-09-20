@@ -1,0 +1,74 @@
+# Reduced target semantics for the recorded Sandy Bridge network devices.
+config NETDEVICES
+ bool "Network devices"
+config ETHERNET
+ bool "Ethernet"
+ depends on NETDEVICES
+config WLAN
+ bool "Wi-Fi"
+ depends on NETDEVICES
+config NET_VENDOR_BROADCOM
+ bool "Broadcom"
+ default y
+if NET_VENDOR_BROADCOM
+config TIGON3
+ tristate "Broadcom Tigon3"
+ depends on PCI && PTP_1588_CLOCK_OPTIONAL
+ select PHYLIB
+endif
+config PTP_1588_CLOCK_OPTIONAL
+ def_bool y
+ depends on PTP_1588_CLOCK || !PTP_1588_CLOCK
+config PTP_1588_CLOCK
+ tristate "Optional timestamping"
+config PHYLIB
+ tristate "PHY support"
+config ATH9K
+ tristate "Atheros 802.11n"
+ depends on MAC80211 && HAS_DMA
+ select ATH9K_HW
+ select ATH9K_COMMON
+ select MAC80211_LEDS if LEDS_CLASS=y || LEDS_CLASS=MAC80211
+config ATH9K_HW
+ tristate
+config ATH9K_COMMON
+ tristate
+ select ATH_COMMON
+config ATH_COMMON
+ tristate
+config ATH9K_PCI
+ bool "PCI bus"
+ depends on ATH9K && PCI
+ default y
+config MAC80211_LEDS
+ bool
+config LEDS_CLASS
+ tristate "LEDs"
+config MAC80211
+ tristate "802.11 stack"
+ depends on CFG80211
+config CFG80211
+ tristate "Wi-Fi configuration"
+config CAN_EMS_PCMCIA
+ tristate "Unrelated PCMCIA CAN"
+ depends on PCMCIA
+config CHELSIO_LIB
+ tristate "Unrelated Chelsio"
+ select DCA
+config QED_RDMA
+ bool "Unrelated QED RDMA"
+ depends on QED
+config SUNRPC
+ tristate "Unrelated RPC"
+config REGMAP
+ bool
+ default y if REGMAP_SOUNDWIRE
+ imply SOUNDWIRE
+config LAST_NETWORK_ENTRY
+ bool
+# These following properties belong to a new menu, not LAST_NETWORK_ENTRY.
+menu "Sound"
+ depends on SOUNDWIRE
+config SND_SOC_SDCA
+ tristate "Unrelated sound"
+endmenu
