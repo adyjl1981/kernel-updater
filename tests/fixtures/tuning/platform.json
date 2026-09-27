@@ -1,0 +1,10 @@
+{
+  "firmware/acpi/platform_profile": "custom",
+  "firmware/acpi/platform_profile_choices": "low-power balanced performance",
+  "class/platform-profile/platform-profile-0/name": "fixture-platform",
+  "class/platform-profile/platform-profile-0/profile": "balanced",
+  "class/platform-profile/platform-profile-0/choices": "low-power balanced performance",
+  "class/platform-profile/platform-profile-1/name": "fixture-cooling",
+  "class/platform-profile/platform-profile-1/profile": "performance",
+  "class/platform-profile/platform-profile-1/choices": "balanced performance"
+}

@@ -1,0 +1,12 @@
+{
+  "devices/system/cpu/cpufreq/policy0/affected_cpus": "0 1 2 3",
+  "devices/system/cpu/cpufreq/policy0/scaling_driver": "scmi-cpufreq",
+  "devices/system/cpu/cpufreq/policy0/scaling_governor": "schedutil",
+  "devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq": "400000",
+  "devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq": "1800000",
+  "devices/system/cpu/cpufreq/policy4/affected_cpus": "4 5 6 7",
+  "devices/system/cpu/cpufreq/policy4/scaling_driver": "scmi-cpufreq",
+  "devices/system/cpu/cpufreq/policy4/scaling_governor": "schedutil",
+  "devices/system/cpu/cpufreq/policy4/cpuinfo_min_freq": "600000",
+  "devices/system/cpu/cpufreq/policy4/cpuinfo_max_freq": "2800000"
+}

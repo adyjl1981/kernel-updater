@@ -1,0 +1,8 @@
+{
+  "devices/system/cpu/cpufreq/policy0/affected_cpus": "0 1 2 3",
+  "devices/system/cpu/cpufreq/policy0/scaling_driver": "acpi-cpufreq",
+  "devices/system/cpu/cpufreq/policy0/scaling_governor": "ondemand",
+  "devices/system/cpu/cpufreq/policy0/scaling_available_governors": "ondemand performance powersave",
+  "devices/system/cpu/cpufreq/policy0/scaling_available_frequencies": "800000 1600000 2400000",
+  "devices/system/cpu/cpu0/power/energy_perf_bias": "6"
+}
