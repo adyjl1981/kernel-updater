@@ -101,6 +101,7 @@ NF_TABLES NF_TABLES_INET NF_TABLES_IPV4 NF_TABLES_IPV6
 NFT_CT NFT_NAT NFT_MASQ NFT_COMPAT NFT_FIB NFT_FIB_IPV4 NFT_FIB_IPV6
 NETFILTER_XTABLES NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_MATCH_CONNTRACK
 NETFILTER_XT_MATCH_COMMENT NETFILTER_XT_MARK NETFILTER_XT_NAT
+NETFILTER_XT_MATCH_IPVS IP_VS IP_VS_RR IP_VS_PROTO_TCP IP_VS_PROTO_UDP IP_VS_IPV6
 NETFILTER_XT_TARGET_MASQUERADE NETFILTER_XT_TARGET_CHECKSUM
 IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT IP_NF_MANGLE IP_NF_RAW
 IP6_NF_IPTABLES IP6_NF_FILTER IP6_NF_NAT IP6_NF_MANGLE IP6_NF_RAW
@@ -113,6 +114,9 @@ CONTAINER_BASELINE_PATTERN = re.compile(
     r"CGROUP|^MEMCG|^CPUSETS$|^CFS_BANDWIDTH$|^FAIR_GROUP_SCHED$|"
     r"^NAMESPACES$|^(UTS|IPC|PID|NET|USER|TIME)_NS$|^SECCOMP|^SYSVIPC|^POSIX_MQUEUE|^OVERLAY_FS|"
     r"^BPF|^KEYS$|^BLK_DEV_THROTTLING$|^SECURITY_(APPARMOR|SELINUX)")
+# Fibre Channel application IDs are hardware-specific despite the CGROUP name.
+# Retaining this optional accounting knob would resurrect NVMe-FC infrastructure.
+CONTAINER_BASELINE_EXCLUSIONS = {"BLK_CGROUP_FC_APPID"}
 RUNTIMES = {
     "Docker": (("dockerd",), ("docker-ce", "docker.io", "moby-engine"),
                ("docker.service", "docker.socket", "snap.docker.dockerd.service")),
@@ -122,6 +126,48 @@ RUNTIMES = {
     "LXC/LXD/Incus": (("lxc-start", "lxd", "incusd"), ("lxc", "lxd", "incus"),
                       ("lxc.service", "lxd.service", "incus.service", "snap.lxd.daemon.service")),
 }
+
+
+# Deliberate userspace capabilities, independent of inventory and application
+# detection. Version-specific symbols are retained when the target defines them.
+COMPATIBILITY_BASELINE = {
+    "containers and firewall": CONTAINER_REQUIRED | CONTAINER_VERSION_GATES,
+    "VPN/tunnelling": set("TUN PPP PPP_ASYNC PPP_DEFLATE PPP_MPPE WIREGUARD XFRM_USER INET_ESP INET6_ESP NET_IPIP IPV6_TUNNEL NET_IPGRE".split()),
+    "filesystems and events": set("EXT4_FS EXT4_FS_POSIX_ACL EXT4_FS_SECURITY BTRFS_FS XFS_FS FUSE_FS CUSE OVERLAY_FS BLK_DEV_LOOP AUTOFS_FS INOTIFY_USER FANOTIFY FS_POSIX_ACL TMPFS_XATTR QUOTA".split()),
+    "IPC and security": set("UNIX SYSVIPC POSIX_MQUEUE FUTEX EPOLL EVENTFD SIGNALFD TIMERFD AIO IO_URING BINFMT_ELF BINFMT_SCRIPT BINFMT_MISC SECURITY SECURITY_APPARMOR SECURITY_YAMA AUDIT KEYS CRYPTO CRYPTO_USER_API CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER CRYPTO_AES CRYPTO_SHA256 CRYPTO_GCM CRYPTO_CBC".split()),
+    "firewall extensions": set("NETFILTER_XT_MATCH_MULTIPORT NETFILTER_XT_MATCH_LIMIT NETFILTER_XT_MATCH_STATE NETFILTER_XT_MATCH_IPRANGE NETFILTER_XT_MATCH_OWNER NETFILTER_XT_TARGET_LOG NETFILTER_XT_TARGET_NFLOG NETFILTER_XT_TARGET_REJECT NFT_REJECT NFT_REJECT_INET NFT_REJECT_IPV4 NFT_REJECT_IPV6 NFT_LOG NFT_LIMIT NFT_FIB_INET NFT_REDIR NF_LOG_SYSLOG NF_CONNTRACK_FTP NF_NAT_FTP IP_NF_TARGET_REJECT IP6_NF_TARGET_REJECT".split()),
+    "routing": set("IP_ADVANCED_ROUTER IP_MULTIPLE_TABLES IPV6_MULTIPLE_TABLES IP_MROUTE DUMMY MACVLAN IPVLAN VXLAN BRIDGE_VLAN_FILTERING NET_SCHED NET_SCH_FQ_CODEL NET_CLS_U32 NET_CLS_BPF NET_ACT_BPF IP_SET IP_VS".split()),
+    "peripherals": SAFETY_MODULES | {"MEDIA_USB_SUPPORT", "USB_SERIAL_GENERIC"},
+    # Snap packages and live/removable images can be unmounted during a scan.
+    "application images": set("SQUASHFS SQUASHFS_XATTR SQUASHFS_ZLIB SQUASHFS_XZ SQUASHFS_LZO SQUASHFS_LZ4 SQUASHFS_ZSTD".split()),
+    "terminals": {"TTY", "UNIX98_PTYS"},
+    # IP_SET alone provides no usable set type for common firewall rules.
+    "firewall sets": set("IP_SET NETFILTER_XT_SET IP_SET_HASH_IP IP_SET_HASH_NET IP_SET_HASH_IPPORT IP_SET_LIST_SET".split()),
+}
+SOFTWARE_PROFILES = {
+    **{name: (e, p, u, ("containers and firewall",)) for name, (e, p, u) in RUNTIMES.items()},
+    "libvirt": (("libvirtd", "virtqemud"), ("libvirt-daemon", "libvirt-daemon-system"), ("libvirtd.service", "virtqemud.socket"), ("virtualisation",)),
+    "QEMU/KVM": (("qemu-system-x86_64", "qemu-system-aarch64"), ("qemu-kvm", "qemu-system-x86"), (), ("virtualisation",)),
+    "VirtualBox": (("VirtualBox", "VBoxHeadless"), ("virtualbox", "virtualbox-7.1"), ("vboxdrv.service",), ("VirtualBox host",)),
+    "WireGuard": (("wg",), ("wireguard-tools",), (), ("VPN/tunnelling",)),
+    "OpenVPN": (("openvpn",), ("openvpn",), ("openvpn.service",), ("VPN/tunnelling",)),
+    "Tailscale": (("tailscaled",), ("tailscale",), ("tailscaled.service",), ("VPN/tunnelling", "containers and firewall")),
+    "Firewall": (("ufw", "firewalld", "nft", "iptables"), ("ufw", "firewalld", "nftables", "iptables"), ("ufw.service", "firewalld.service", "nftables.service"), ("containers and firewall", "firewall extensions")),
+    "Samba/CIFS": (("smbd", "mount.cifs"), ("samba", "cifs-utils"), ("smbd.service",), ("CIFS",)),
+    "NFS": (("mount.nfs", "rpc.nfsd"), ("nfs-common", "nfs-kernel-server", "nfs-utils"), ("nfs-server.service",), ("NFS",)),
+    "FUSE": (("fusermount", "fusermount3", "sshfs", "rclone"), ("fuse", "fuse3", "sshfs", "rclone"), (), ("filesystems and events",)),
+}
+SOFTWARE_CAPABILITIES = {
+    **COMPATIBILITY_BASELINE,
+    "virtualisation": set("VIRTUALIZATION KVM TUN VHOST_NET VHOST_VSOCK VIRTIO VIRTIO_PCI VIRTIO_BLK VIRTIO_NET VSOCKETS".split()),
+    "VirtualBox host": {"MODULES", "PCI", "NET", "INET", "TUN", "BRIDGE", "HIGH_RES_TIMERS"},
+    "CIFS": {"CIFS", "CIFS_XATTR", "CIFS_POSIX"},
+    "NFS": {"NFS_FS", "NFS_V3", "NFS_V4", "NFSD", "NFSD_V3", "NFSD_V4"},
+}
+
+
+# Modern NFSD includes NFSv3 without a separate switch; older targets expose it.
+SOFTWARE_VERSION_GATES = {"NFSD_V3"}
 
 
 @dataclass
@@ -140,12 +186,15 @@ class HardwareReport:
     refusal_reason: str = ""
     network_devices: list[dict] = field(default_factory=list)
     container_runtimes: dict[str, list[str]] = field(default_factory=dict)
+    software: dict[str, list[str]] = field(default_factory=dict)
+    hardware_devices: list[dict] = field(default_factory=list)
 
 
 class Scanner:
-    def __init__(self, sys_root="/sys", proc_root="/proc", boot_root="/boot", runner=None):
+    def __init__(self, sys_root="/sys", proc_root="/proc", boot_root="/boot", runner=None, etc_root="/etc"):
         self.sys = Path(sys_root); self.proc = Path(proc_root); self.boot = Path(boot_root)
         self.runner = runner or self._run
+        self.etc = Path(etc_root)
 
     @staticmethod
     def _run(args):
@@ -161,14 +210,19 @@ class Scanner:
             warnings.append(f"{args[0]} failed: {exc}")
             return ""
 
-    def detect_container_runtimes(self, warnings):
+    def detect_software(self, warnings):
         """Read-only evidence; never run/start a runtime or depend on loaded modules."""
         packages = self.command(
             ["dpkg-query", "-W", "-f=${binary:Package} ${db:Status-Status}\n"], warnings)
         installed = {p[0].split(":")[0] for line in packages.splitlines()
                      if len(p := line.split()) == 2 and p[1] == "installed"}
+        for tool, args in (("rpm", ["rpm", "-qa", "--qf", "%{NAME}\n"]),
+                           ("pacman", ["pacman", "-Qq"]),
+                           ("apk", ["apk", "info"])):
+            if shutil.which(tool):
+                installed.update(self.command(args, warnings).splitlines())
         found = {}
-        for name, (executables, package_names, units) in RUNTIMES.items():
+        for name, (executables, package_names, units, _) in SOFTWARE_PROFILES.items():
             evidence = ["executable: " + exe for exe in executables if shutil.which(exe)]
             evidence += ["package: " + pkg for pkg in package_names if pkg in installed]
             for unit in units:
@@ -178,7 +232,25 @@ class Scanner:
                     evidence.append("unit: " + unit + " (" + state + ")")
             if evidence:
                 found[name] = evidence
+        # Mount declarations are useful evidence even when the filesystem is
+        # not mounted and its userspace helper is outside PATH.
+        try:
+            for line in (self.etc / "fstab").read_text().splitlines():
+                fields = line.split("#", 1)[0].split()
+                if len(fields) < 3:
+                    continue
+                fs = fields[2]
+                name = ("NFS" if fs in ("nfs", "nfs4") else
+                        "Samba/CIFS" if fs in ("cifs", "smb3") else
+                        "FUSE" if fs == "fuse" or fs.startswith("fuse.") else None)
+                if name:
+                    found.setdefault(name, []).append("fstab filesystem: " + fs)
+        except OSError:
+            pass
         return found
+
+    def detect_container_runtimes(self, warnings):
+        return {k: v for k, v in self.detect_software(warnings).items() if k in RUNTIMES}
 
     @staticmethod
     def _module_from_device(device):
@@ -287,9 +359,17 @@ class Scanner:
             reason = "The controller behind the root block device could not be identified. Use Standard mode."
         elif not modules:
             reason = "No loaded or sysfs-bound hardware drivers were found. Use Standard mode."
+        hardware_devices = []
+        # Record bound module providers for every bus class, not just networking.
+        for bus in (self.sys / "bus/pci/devices", self.sys / "bus/usb/devices"):
+            for device in bus.glob("*"):
+                module = self._module_from_device(device)
+                if module:
+                    hardware_devices.append({"device": str(device), "drivers": [module]})
+        software = self.detect_software(warnings)
         return HardwareReport(arch, cpu, root_source, root_fs, boot_fs, pci, usb,
                               sorted(modules), categories, warnings, not reason, reason, network_devices,
-                              self.detect_container_runtimes(warnings))
+                              {k: v for k, v in software.items() if k in RUNTIMES}, software, hardware_devices)
 
 
 def render_report(r):
@@ -297,6 +377,8 @@ def render_report(r):
              f"Root: {r.root_source or 'unknown'} ({r.root_filesystem or 'unknown'})",
              f"Detected driver modules: {', '.join(r.modules) or 'none'}", ""]
     lines.append("Container runtimes: " + (", ".join(r.container_runtimes) or "none detected"))
+    lines.append("Installed software compatibility: " + (", ".join(dict(r.container_runtimes, **r.software)) or "none detected"))
+    lines.append("General compatibility: containers, VPN/tunnelling, printing, removable storage, Bluetooth, common filesystems")
     if r.container_runtimes:
         lines.append("  Retaining namespaces, cgroups, IPC, seccomp, overlayfs and container networking.")
     for name, items in r.categories.items():
@@ -401,10 +483,10 @@ def capability_closure(baseline, source, seeds, catalog=None):
     return expected
 
 
-def networking_baseline(baseline, source, extra_symbols=()):
+def networking_baseline(baseline, source, extra_symbols=(), catalog=None):
     """Retain deliberate network compatibility capabilities, not all of net/."""
     working = _config_values(baseline)
-    catalog = kconfig_capabilities(source, working)
+    catalog = catalog or kconfig_capabilities(source, working)
     types, _, network, _ = catalog
     if not network:
         raise RuntimeError("target networking Kconfig definitions are unavailable")
@@ -412,7 +494,7 @@ def networking_baseline(baseline, source, extra_symbols=()):
     return capability_closure(baseline, source, seeds | set(extra_symbols), catalog)
 
 
-def network_requirements(report, baseline, source):
+def network_requirements(report, baseline, source, catalog=None):
     mapping = network_driver_symbols(source)
     working = _config_values(baseline)
     seeds = set()
@@ -433,16 +515,16 @@ def network_requirements(report, baseline, source):
                       re.match(r"(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\b", device["device"]))
         if "ath9k" in device["drivers"] and pci_device:
             seeds.add("ATH9K_PCI")
-    return networking_baseline(baseline, source, seeds)
+    return networking_baseline(baseline, source, seeds, catalog)
 
 
-def container_requirements(report, baseline, source):
-    if not report.container_runtimes:
+def container_requirements(report, baseline, source, catalog=None):
+    if not (report.container_runtimes or set(report.software) & RUNTIMES.keys()):
         return {}
     if not baseline or not source:
         raise RuntimeError("container preservation requires a baseline and target Kconfig source")
     working = _config_values(baseline)
-    catalog = kconfig_capabilities(source, working)
+    catalog = catalog or kconfig_capabilities(source, working)
     types, _, _, prompted = catalog
     unavailable = CONTAINER_REQUIRED - types.keys()
     if unavailable:
@@ -451,7 +533,7 @@ def container_requirements(report, baseline, source):
     # Preserve chosen container features, not hidden implementation helpers
     # whose only consumer (e.g. Btrfs's BLK_CGROUP_PUNT_BIO) was pruned.
     seeds = {k for k in working if k in prompted and working[k] in ("y", "m")
-             and CONTAINER_BASELINE_PATTERN.search(k)}
+             and CONTAINER_BASELINE_PATTERN.search(k) and k not in CONTAINER_BASELINE_EXCLUSIONS}
     seeds.update(CONTAINER_REQUIRED | (CONTAINER_VERSION_GATES & types.keys()))
     return capability_closure(baseline, source, seeds, catalog)
 
@@ -467,10 +549,10 @@ def verify_containers(path, report, baseline, source):
                            ", ".join("CONFIG_" + k for k in missing))
 
 
-def network_driver_symbols(source):
+def network_driver_symbols(source, roots=("drivers/net",)):
     """Resolve module output names through the target Kbuild files."""
     result = {}
-    for path in (Path(source) / "drivers/net").rglob("Makefile"):
+    for path in (p for root in roots for p in (Path(source) / root).rglob("Makefile")):
         text = path.read_text(errors="replace").replace("\\\n", " ")
         for symbol, outputs in re.findall(
                 r"obj-\$\(CONFIG_(\w+)\)\s*[:+]?=([^\n]+)", text):
@@ -479,9 +561,9 @@ def network_driver_symbols(source):
     return result
 
 
-def verify_network(path, report, baseline, source):
+def verify_network(path, report, baseline, source, catalog=None):
     values = _config_values(path)
-    expected = network_requirements(report, baseline, source)
+    expected = network_requirements(report, baseline, source, catalog)
     missing = sorted(k for k, v in expected.items()
                      if values.get(k) not in ({"y"} if v == "y" else {"y", "m"}))
     mapping = network_driver_symbols(source)
@@ -499,8 +581,76 @@ def verify_network(path, report, baseline, source):
         raise RuntimeError("network support rejected by Kconfig: " + "; ".join(details))
 
 
+def hardware_requirements(report, baseline, source, catalog=None):
+    mapping = network_driver_symbols(source, ("drivers", "sound"))
+    working = _config_values(baseline)
+    catalog = catalog or kconfig_capabilities(source, working)
+    groups = {}
+    for device in report.hardware_devices:
+        candidates = set().union(*(mapping.get(m, set()) for m in device["drivers"]))
+        selected = {k for k in candidates if working.get(k) in ("y", "m")}
+        if not selected and len(candidates) == 1:
+            selected = candidates
+        if not selected:
+            raise RuntimeError("Detected hardware: no verified target Kbuild provider for " +
+                               device["device"] + " (" + ", ".join(device["drivers"]) + ")")
+        groups[device["device"]] = capability_closure(baseline, source, selected, catalog)
+    return groups
+
+
+def compatibility_requirements(baseline, source, catalog=None):
+    catalog = catalog or kconfig_capabilities(source, _config_values(baseline))
+    missing = CONTAINER_REQUIRED - catalog[0].keys()
+    if missing:
+        raise RuntimeError("General baseline / containers and firewall: required target capabilities unavailable: " +
+                           ", ".join("CONFIG_" + k for k in sorted(missing)))
+    return {name: capability_closure(baseline, source, seeds & catalog[0].keys(), catalog)
+            for name, seeds in COMPATIBILITY_BASELINE.items()}
+
+
+def software_requirements(report, baseline, source, catalog=None):
+    catalog = catalog or kconfig_capabilities(source, _config_values(baseline))
+    result = {}
+    for name in dict(report.container_runtimes, **report.software):
+        if name not in SOFTWARE_PROFILES:
+            raise RuntimeError("unknown installed-software profile: " + name)
+        seeds = set().union(*(SOFTWARE_CAPABILITIES[c] for c in SOFTWARE_PROFILES[name][3]))
+        # Prefer the scanned CPU vendor; use working backend choices if unknown.
+        if "virtualisation" in SOFTWARE_PROFILES[name][3]:
+            working = _config_values(baseline)
+            vendors = ("KVM_INTEL",) if "Intel" in report.cpu else (("KVM_AMD",) if "AMD" in report.cpu else ("KVM_INTEL", "KVM_AMD"))
+            # An earlier optimised kernel may already have lost its host backend.
+            # Known x86 vendors must recover it even when absent from the input.
+            if report.architecture in ("x86_64", "amd64", "i386", "i686") and len(vendors) == 1:
+                seeds.update(vendors)
+            else:
+                seeds.update(k for k in vendors if working.get(k) in ("y", "m"))
+        seeds -= (CONTAINER_VERSION_GATES | SOFTWARE_VERSION_GATES | SOFTWARE_CAPABILITIES["firewall extensions"]) - catalog[0].keys()
+        try:
+            result[name] = capability_closure(baseline, source, seeds, catalog)
+            if name in RUNTIMES:
+                result[name].update(container_requirements(report, baseline, source, catalog))
+        except RuntimeError as exc:
+            raise RuntimeError(f"Installed software / {name} compatibility failed: {exc}") from exc
+    return result
+
+
+def verify_capability_groups(path, category, groups):
+    values = _config_values(path)
+    for name, expected in groups.items():
+        missing = sorted(k for k, v in expected.items()
+                         if values.get(k) not in ({"y"} if v == "y" else {"y", "m"}))
+        if missing:
+            details = ", ".join("CONFIG_" + k for k in missing[:8])
+            if len(missing) > 8:
+                details += f" (and {len(missing) - 8} more)"
+            raise RuntimeError(f"{category} / {name} compatibility failed: required {details} did not survive final configuration")
+
+
 def update_config(path, report, baseline=None, source=None):
     """Apply required values without touching an installed kernel config."""
+    if report.software and not (baseline and source):
+        raise RuntimeError("installed-software preservation requires a baseline and target Kconfig source")
     config = Path(path)
     values = {x: "y" for x in SAFETY_BUILTIN}
     values.update({x: "m" for x in SAFETY_MODULES})
@@ -510,12 +660,27 @@ def update_config(path, report, baseline=None, source=None):
             value = baseline_values.get(symbol)
             if value in ("y", "m"):
                 values[symbol] = value
+    catalog = kconfig_capabilities(source, baseline_values) if source and baseline else None
     if source and baseline:
-        network = network_requirements(report, baseline, source)
+        network = network_requirements(report, baseline, source, catalog)
         # Baseline values are useful configuration inputs, but a helper which
         # Kconfig can legitimately demote to m is not a built-in requirement.
         values.update({k: "y" if baseline_values.get(k) == "y" else v for k, v in network.items()})
-    values.update(container_requirements(report, baseline, source))
+    values.update(container_requirements(report, baseline, source, catalog))
+    if source and baseline:
+        for groups in (hardware_requirements(report, baseline, source, catalog),
+                       compatibility_requirements(baseline, source, catalog),
+                       software_requirements(report, baseline, source, catalog)):
+            for expected in groups.values():
+                for k, v in expected.items():
+                    if values.get(k) != "y":
+                        values[k] = v
+    if baseline:
+        for symbol in BOOT_BASELINE_SYMBOLS:
+            if baseline_values.get(symbol) in ("y", "m"):
+                values[symbol] = baseline_values[symbol]
+    if report.root_source.startswith("/dev/mapper/"):
+        values["BLK_DEV_DM"] = "y"
     values[FS_CONFIG[report.root_filesystem]] = "y"
     for fs in report.boot_filesystems:
         if fs in FS_CONFIG: values[FS_CONFIG[fs]] = "y"
@@ -533,6 +698,8 @@ def update_config(path, report, baseline=None, source=None):
 
 
 def verify_config(path, report, baseline=None, source=None):
+    if report.software and not (baseline and source):
+        raise RuntimeError("installed-software preservation requires a baseline and target Kconfig source")
     text = Path(path).read_text()
     values = dict(re.findall(r"^(CONFIG_[A-Za-z0-9_]+)=([ym])$", text, re.M))
     required = {"CONFIG_MODULES", "CONFIG_BLOCK", "CONFIG_BLK_DEV_INITRD",
@@ -547,20 +714,28 @@ def verify_config(path, report, baseline=None, source=None):
         baseline_values = _config_values(baseline)
         required.update("CONFIG_" + symbol for symbol in BOOT_BASELINE_SYMBOLS
                         if baseline_values.get(symbol) == "y")
+    required.update("CONFIG_" + FS_CONFIG[fs] for fs in report.boot_filesystems if fs in FS_CONFIG)
+    if report.root_source.startswith("/dev/mapper/"):
+        required.add("CONFIG_BLK_DEV_DM")
     missing = sorted(key for key in required if values.get(key) != "y")
     if baseline:
         mismatched = sorted(
             "CONFIG_" + symbol for symbol in BOOT_BASELINE_SYMBOLS
             if baseline_values.get(symbol) in ("y", "m")
-            and values.get("CONFIG_" + symbol) != baseline_values[symbol]
+            and values.get("CONFIG_" + symbol) not in ({"y"} if baseline_values[symbol] == "y" else {"y", "m"})
         )
         missing = sorted(set(missing + mismatched))
     if missing:
-        raise RuntimeError("critical settings were rejected by Kconfig: " + ", ".join(missing))
+        raise RuntimeError("Boot-critical settings were rejected by Kconfig: " + ", ".join(missing))
 
-    verify_containers(path, report, baseline, source)
+    if report.container_runtimes and not (baseline and source):
+        verify_containers(path, report, baseline, source)
     if source and baseline:
-        verify_network(path, report, baseline, source)
+        catalog = kconfig_capabilities(source, baseline_values)
+        verify_network(path, report, baseline, source, catalog)
+        verify_capability_groups(path, "Detected hardware", hardware_requirements(report, baseline, source, catalog))
+        verify_capability_groups(path, "Installed software", software_requirements(report, baseline, source, catalog))
+        verify_capability_groups(path, "General baseline", compatibility_requirements(baseline, source, catalog))
 
 
 def main():

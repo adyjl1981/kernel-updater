@@ -1,0 +1,509 @@
+{
+  "architecture": "x86_64",
+  "cpu": "Intel(R) Celeron(R) N4505 @ 2.00GHz",
+  "root_source": "/dev/nvme0n1p5",
+  "root_filesystem": "ext4",
+  "boot_filesystems": [
+    "vfat"
+  ],
+  "pci_devices": [
+    "00:00.0 Host bridge [0600]: Intel Corporation Device [8086:4e14]",
+    "00:02.0 VGA compatible controller [0300]: Intel Corporation JasperLake [UHD Graphics] [8086:4e55] (rev 01)",
+    "00:04.0 Signal processing controller [1180]: Intel Corporation Dynamic Tuning service [8086:4e03]",
+    "00:08.0 System peripheral [0880]: Intel Corporation Device [8086:4e11]",
+    "00:14.0 USB controller [0c03]: Intel Corporation Jasper Lake USB 3.1 xHCI Host Controller [8086:4ded] (rev 01)",
+    "00:14.2 RAM memory [0500]: Intel Corporation Jasper Lake Shared SRAM [8086:4def] (rev 01)",
+    "00:14.5 SD Host controller [0805]: Intel Corporation Jasper Lake SD Controller [8086:4df8] (rev 01)",
+    "00:16.0 Communication controller [0780]: Intel Corporation Management Engine Interface [8086:4de0] (rev 01)",
+    "00:17.0 SATA controller [0106]: Intel Corporation Jasper Lake SATA AHCI Controller [8086:4dd3] (rev 01)",
+    "00:1c.0 PCI bridge [0604]: Intel Corporation Jasper Lake PCIe Root Port #1 [8086:4db8] (rev 01)",
+    "00:1c.1 PCI bridge [0604]: Intel Corporation Jasper Lake PCIe Root Port #2 [8086:4db9] (rev 01)",
+    "00:1c.4 PCI bridge [0604]: Intel Corporation Jasper Lake PCIe Root Port #5 [8086:4dbc] (rev 01)",
+    "00:1f.0 ISA bridge [0601]: Intel Corporation Jasper Lake eSPI Controller [8086:4d87] (rev 01)",
+    "00:1f.3 Multimedia audio controller [0401]: Intel Corporation Jasper Lake HD Audio [8086:4dc8] (rev 01)",
+    "00:1f.4 SMBus [0c05]: Intel Corporation Jasper Lake SMBus [8086:4da3] (rev 01)",
+    "00:1f.5 Serial bus controller [0c80]: Intel Corporation Jasper Lake SPI Controller [8086:4da4] (rev 01)",
+    "01:00.0 Ethernet controller [0200]: Realtek Semiconductor Co., Ltd. RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller [10ec:8168] (rev 15)",
+    "02:00.0 Network controller [0280]: MEDIATEK Corp. MT7921 802.11ax PCI Express Wireless Network Adapter [14c3:7961]",
+    "03:00.0 Non-Volatile memory controller [0108]: Kingston Technology Company, Inc. OM3PDP3 NVMe SSD [2646:500d] (rev 01)"
+  ],
+  "usb_devices": [
+    "sysfs usb1: Linux 7.2.6-optimized xhci-hcd xHCI Host Controller",
+    "sysfs 1-5: MTD USB Camera",
+    "sysfs 1-1: Acer Acer 2.4G Device",
+    "sysfs 1-8: MediaTek Inc. Wireless_Device"
+  ],
+  "modules": [
+    "acpi_pad",
+    "acpi_tad",
+    "acpi_thermal_rel",
+    "aesni_intel",
+    "af_alg",
+    "ahci",
+    "algif_hash",
+    "algif_skcipher",
+    "arp_tables",
+    "autofs4",
+    "binfmt_misc",
+    "bluetooth",
+    "bnep",
+    "br_netfilter",
+    "bridge",
+    "btbcm",
+    "btintel",
+    "btmtk",
+    "btrtl",
+    "btusb",
+    "ccm",
+    "cec",
+    "cfg80211",
+    "cmdlinepart",
+    "coretemp",
+    "cqhci",
+    "dmi_sysfs",
+    "drm_buddy",
+    "drm_display_helper",
+    "ee1004",
+    "efi_pstore",
+    "evdev",
+    "fuse",
+    "gf128mul",
+    "hid_generic",
+    "i2c_algo_bit",
+    "i2c_i801",
+    "i2c_smbus",
+    "i801_smbus",
+    "i915",
+    "input_leds",
+    "int3400_thermal",
+    "int3403_thermal",
+    "int340x_thermal_zone",
+    "intel_cstate",
+    "intel_pmc_core",
+    "intel_pmc_pwrm_telemetry",
+    "intel_pmc_ssram_telemetry",
+    "intel_powerclamp",
+    "intel_rapl_common",
+    "intel_rapl_msr",
+    "intel_soc_dts_iosf",
+    "intel_spi",
+    "intel_vsec",
+    "ip6_tables",
+    "ip6table_filter",
+    "ip_tables",
+    "iptable_filter",
+    "irqbypass",
+    "joydev",
+    "kvm",
+    "kvm_intel",
+    "libahci",
+    "libarc4",
+    "llc",
+    "lp",
+    "mac80211",
+    "mac_hid",
+    "mc",
+    "mei",
+    "mei_hdcp",
+    "mei_me",
+    "mei_pxp",
+    "mmc_core",
+    "msr",
+    "mt76",
+    "mt76_connac_lib",
+    "mt7921_common",
+    "mt7921e",
+    "mt792x_lib",
+    "mtd",
+    "nf_conntrack",
+    "nf_defrag_ipv4",
+    "nf_defrag_ipv6",
+    "nf_nat",
+    "nf_tables",
+    "nft_chain_nat",
+    "nls_cp437",
+    "nls_iso8859_1",
+    "nvme",
+    "nvme_auth",
+    "nvme_core",
+    "nvme_keyring",
+    "parport",
+    "parport_pc",
+    "pcieport",
+    "pcieportdrv",
+    "phy_package",
+    "pinctrl_jasperlake",
+    "platform_temperature_control",
+    "pmt_class",
+    "pmt_discovery",
+    "pmt_telemetry",
+    "ppdev",
+    "proc_thermal",
+    "processor_thermal_device",
+    "processor_thermal_device_pci_legacy",
+    "processor_thermal_mbox",
+    "processor_thermal_power_floor",
+    "processor_thermal_rapl",
+    "processor_thermal_rfim",
+    "processor_thermal_soc_slider",
+    "processor_thermal_wt_hint",
+    "processor_thermal_wt_req",
+    "qrtr",
+    "r8169",
+    "rc_core",
+    "realtek",
+    "rfcomm",
+    "sch_fq_codel",
+    "sdhci",
+    "sdhci_pci",
+    "sdhci_uhs2",
+    "snd",
+    "snd_compress",
+    "snd_hda_codec",
+    "snd_hda_codec_alc662",
+    "snd_hda_codec_generic",
+    "snd_hda_codec_hdmi",
+    "snd_hda_codec_intelhdmi",
+    "snd_hda_codec_realtek_lib",
+    "snd_hda_core",
+    "snd_hda_ext_core",
+    "snd_hda_intel",
+    "snd_hrtimer",
+    "snd_hwdep",
+    "snd_intel_dspcfg",
+    "snd_pcm",
+    "snd_rawmidi",
+    "snd_seq",
+    "snd_seq_device",
+    "snd_seq_dummy",
+    "snd_seq_midi",
+    "snd_seq_midi_event",
+    "snd_soc_acpi",
+    "snd_soc_acpi_intel_match",
+    "snd_soc_acpi_intel_sdca_quirks",
+    "snd_soc_avs",
+    "snd_soc_core",
+    "snd_soc_hda_codec",
+    "snd_soc_hdac_hda",
+    "snd_soc_sdca",
+    "snd_sof",
+    "snd_sof_intel_hda",
+    "snd_sof_intel_hda_common",
+    "snd_sof_intel_hda_generic",
+    "snd_sof_intel_hda_mlink",
+    "snd_sof_pci",
+    "snd_sof_pci_intel_cnl",
+    "snd_sof_pci_intel_icl",
+    "snd_sof_utils",
+    "snd_sof_xtensa_dsp",
+    "snd_timer",
+    "soundcore",
+    "spi_intel",
+    "spi_intel_pci",
+    "spi_nor",
+    "stp",
+    "ttm",
+    "usbcore",
+    "usbhid",
+    "uvc",
+    "uvcvideo",
+    "video",
+    "videobuf2_common",
+    "videobuf2_memops",
+    "videobuf2_v4l2",
+    "videobuf2_vmalloc",
+    "videodev",
+    "wmi",
+    "wmi_bmof",
+    "x86_pkg_temp_thermal",
+    "x_tables",
+    "xhci_hcd",
+    "xhci_pci"
+  ],
+  "categories": {
+    "Storage and boot": [
+      "00:17.0 SATA controller [0106]: Intel Corporation Jasper Lake SATA AHCI Controller [8086:4dd3] (rev 01)",
+      "03:00.0 Non-Volatile memory controller [0108]: Kingston Technology Company, Inc. OM3PDP3 NVMe SSD [2646:500d] (rev 01)"
+    ],
+    "Graphics/display": [
+      "00:02.0 VGA compatible controller [0300]: Intel Corporation JasperLake [UHD Graphics] [8086:4e55] (rev 01)"
+    ],
+    "Ethernet/Wi-Fi": [
+      "01:00.0 Ethernet controller [0200]: Realtek Semiconductor Co., Ltd. RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller [10ec:8168] (rev 15)",
+      "02:00.0 Network controller [0280]: MEDIATEK Corp. MT7921 802.11ax PCI Express Wireless Network Adapter [14c3:7961]"
+    ],
+    "Audio": [
+      "00:1f.3 Multimedia audio controller [0401]: Intel Corporation Jasper Lake HD Audio [8086:4dc8] (rev 01)"
+    ],
+    "Bluetooth": [],
+    "Input devices": [],
+    "USB controllers/devices": [
+      "00:14.0 USB controller [0c03]: Intel Corporation Jasper Lake USB 3.1 xHCI Host Controller [8086:4ded] (rev 01)",
+      "sysfs usb1: Linux 7.2.6-optimized xhci-hcd xHCI Host Controller",
+      "sysfs 1-5: MTD USB Camera",
+      "sysfs 1-1: Acer Acer 2.4G Device",
+      "sysfs 1-8: MediaTek Inc. Wireless_Device"
+    ],
+    "Other PCI/PCIe": [
+      "00:00.0 Host bridge [0600]: Intel Corporation Device [8086:4e14]",
+      "00:02.0 VGA compatible controller [0300]: Intel Corporation JasperLake [UHD Graphics] [8086:4e55] (rev 01)",
+      "00:04.0 Signal processing controller [1180]: Intel Corporation Dynamic Tuning service [8086:4e03]",
+      "00:08.0 System peripheral [0880]: Intel Corporation Device [8086:4e11]",
+      "00:14.0 USB controller [0c03]: Intel Corporation Jasper Lake USB 3.1 xHCI Host Controller [8086:4ded] (rev 01)",
+      "00:14.2 RAM memory [0500]: Intel Corporation Jasper Lake Shared SRAM [8086:4def] (rev 01)",
+      "00:14.5 SD Host controller [0805]: Intel Corporation Jasper Lake SD Controller [8086:4df8] (rev 01)",
+      "00:16.0 Communication controller [0780]: Intel Corporation Management Engine Interface [8086:4de0] (rev 01)",
+      "00:17.0 SATA controller [0106]: Intel Corporation Jasper Lake SATA AHCI Controller [8086:4dd3] (rev 01)",
+      "00:1c.0 PCI bridge [0604]: Intel Corporation Jasper Lake PCIe Root Port #1 [8086:4db8] (rev 01)",
+      "00:1c.1 PCI bridge [0604]: Intel Corporation Jasper Lake PCIe Root Port #2 [8086:4db9] (rev 01)",
+      "00:1c.4 PCI bridge [0604]: Intel Corporation Jasper Lake PCIe Root Port #5 [8086:4dbc] (rev 01)",
+      "00:1f.0 ISA bridge [0601]: Intel Corporation Jasper Lake eSPI Controller [8086:4d87] (rev 01)",
+      "00:1f.3 Multimedia audio controller [0401]: Intel Corporation Jasper Lake HD Audio [8086:4dc8] (rev 01)",
+      "00:1f.4 SMBus [0c05]: Intel Corporation Jasper Lake SMBus [8086:4da3] (rev 01)",
+      "00:1f.5 Serial bus controller [0c80]: Intel Corporation Jasper Lake SPI Controller [8086:4da4] (rev 01)",
+      "01:00.0 Ethernet controller [0200]: Realtek Semiconductor Co., Ltd. RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller [10ec:8168] (rev 15)",
+      "02:00.0 Network controller [0280]: MEDIATEK Corp. MT7921 802.11ax PCI Express Wireless Network Adapter [14c3:7961]",
+      "03:00.0 Non-Volatile memory controller [0108]: Kingston Technology Company, Inc. OM3PDP3 NVMe SSD [2646:500d] (rev 01)"
+    ]
+  },
+  "warnings": [],
+  "safe": true,
+  "refusal_reason": "",
+  "network_devices": [
+    {
+      "device": "01:00.0 Ethernet controller [0200]: Realtek Semiconductor Co., Ltd. RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller [10ec:8168] (rev 15)",
+      "drivers": [
+        "r8169"
+      ]
+    },
+    {
+      "device": "02:00.0 Network controller [0280]: MEDIATEK Corp. MT7921 802.11ax PCI Express Wireless Network Adapter [14c3:7961]",
+      "drivers": [
+        "mt7921e"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:02:00.0",
+      "drivers": [
+        "mt7921e"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:01:00.0",
+      "drivers": [
+        "r8169"
+      ]
+    },
+    {
+      "device": "/sys/class/net/enp1s0",
+      "drivers": [
+        "r8169"
+      ]
+    },
+    {
+      "device": "/sys/class/net/wlp2s0",
+      "drivers": [
+        "mt7921e"
+      ]
+    }
+  ],
+  "container_runtimes": {
+    "Docker": [
+      "executable: dockerd",
+      "package: docker-ce",
+      "unit: docker.service (enabled)",
+      "unit: docker.socket (enabled)"
+    ],
+    "containerd": [
+      "executable: containerd",
+      "package: containerd.io",
+      "unit: containerd.service (enabled)"
+    ]
+  },
+  "software": {
+    "Docker": [
+      "executable: dockerd",
+      "package: docker-ce",
+      "unit: docker.service (enabled)",
+      "unit: docker.socket (enabled)"
+    ],
+    "containerd": [
+      "executable: containerd",
+      "package: containerd.io",
+      "unit: containerd.service (enabled)"
+    ],
+    "QEMU/KVM": [
+      "executable: qemu-system-x86_64",
+      "package: qemu-system-x86"
+    ],
+    "OpenVPN": [
+      "executable: openvpn",
+      "package: openvpn",
+      "unit: openvpn.service (enabled)"
+    ],
+    "Tailscale": [
+      "executable: tailscaled",
+      "package: tailscale",
+      "unit: tailscaled.service (enabled)"
+    ],
+    "Firewall": [
+      "executable: ufw",
+      "executable: nft",
+      "executable: iptables",
+      "package: ufw",
+      "package: nftables",
+      "package: iptables",
+      "unit: ufw.service (enabled)"
+    ],
+    "Samba/CIFS": [
+      "executable: smbd",
+      "package: samba",
+      "unit: smbd.service (enabled)"
+    ],
+    "FUSE": [
+      "executable: fusermount",
+      "executable: fusermount3",
+      "package: fuse3"
+    ]
+  },
+  "hardware_devices": [
+    {
+      "device": "/sys/bus/pci/devices/0000:03:00.0",
+      "drivers": [
+        "nvme"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:17.0",
+      "drivers": [
+        "ahci"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:1c.0",
+      "drivers": [
+        "pcieportdrv"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:02:00.0",
+      "drivers": [
+        "mt7921e"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:14.5",
+      "drivers": [
+        "sdhci_pci"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:04.0",
+      "drivers": [
+        "processor_thermal_device_pci_legacy"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:16.0",
+      "drivers": [
+        "mei_me"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:01:00.0",
+      "drivers": [
+        "r8169"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:1f.5",
+      "drivers": [
+        "spi_intel_pci"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:1f.3",
+      "drivers": [
+        "snd_hda_intel"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:1c.1",
+      "drivers": [
+        "pcieportdrv"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:1c.4",
+      "drivers": [
+        "pcieportdrv"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:02.0",
+      "drivers": [
+        "i915"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:14.0",
+      "drivers": [
+        "xhci_pci"
+      ]
+    },
+    {
+      "device": "/sys/bus/pci/devices/0000:00:1f.4",
+      "drivers": [
+        "i2c_i801"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-8:1.1",
+      "drivers": [
+        "btusb"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-1:1.1",
+      "drivers": [
+        "usbhid"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-5:1.1",
+      "drivers": [
+        "uvcvideo"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-0:1.0",
+      "drivers": [
+        "usbcore"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-8:1.0",
+      "drivers": [
+        "btusb"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-1:1.0",
+      "drivers": [
+        "usbhid"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/2-0:1.0",
+      "drivers": [
+        "usbcore"
+      ]
+    },
+    {
+      "device": "/sys/bus/usb/devices/1-5:1.0",
+      "drivers": [
+        "uvcvideo"
+      ]
+    }
+  ]
+}

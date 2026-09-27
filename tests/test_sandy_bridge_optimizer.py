@@ -15,12 +15,12 @@ from pathlib import Path
 import hardware_optimizer as hw
 
 FIXTURE = Path(__file__).parent / 'fixtures/sandy_bridge'
-SOURCE = Path('/home/adrian/kernel-build/linux-7.2.6')
+SOURCE = Path(os.environ.get('KERNEL_SOURCE_726', '/home/adrian/kernel-build/linux-7.2.6'))
 PROJECT = Path(__file__).resolve().parents[1]
 
 
 def native_conf(test):
-    candidates = list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf'))
+    candidates = ([Path(os.environ['KERNEL_KCONFIG_CONF'])] if os.environ.get('KERNEL_KCONFIG_CONF') else list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf')))
     if not candidates:
         test.skipTest('Target Kconfig conf executable unavailable')
     return candidates[0]
@@ -39,7 +39,7 @@ class SandyBridgeRequirementsTests(unittest.TestCase):
         # keep unrelated networking options in the fixture's network file.
         network = (self.root / 'drivers/net/Kconfig').read_text()
         defined = set(re.findall(r'^config (\w+)', network, re.M))
-        names = hw.SAFETY_BUILTIN | hw.SAFETY_MODULES | {
+        names = hw.SAFETY_BUILTIN | hw.SAFETY_MODULES | hw.CONTAINER_REQUIRED | {
             'X86_64', 'EXT4_FS', 'HAS_DMA', 'PCMCIA', 'DCA', 'QED',
             'REGMAP_SOUNDWIRE', 'SOUNDWIRE', 'MT792x_LIB', 'EXTERNAL_HELPER'}
         text = ''
@@ -190,7 +190,7 @@ config NEW_STRING
 
 class TargetSandyBridgeConfigTests(unittest.TestCase):
     def test_linux_726_clang_config_only(self):
-        conf = SOURCE / 'scripts/kconfig/conf'
+        conf = Path(os.environ.get('KERNEL_KCONFIG_CONF', str(SOURCE / 'scripts/kconfig/conf')))
         if not conf.exists() or not shutil.which('clang') or not shutil.which('ld.lld'):
             self.skipTest('Linux 7.2.6 conf or Clang/LLD unavailable')
         report = hw.HardwareReport(**json.loads((FIXTURE / 'hardware.json').read_text()))

@@ -511,3 +511,23 @@ config X86_IO_APIC
  bool "X86_IO_APIC"
 config X86_LOCAL_APIC
  bool "X86_LOCAL_APIC"
+
+# Common IPVS ingress facilities; required by the runtime capability checker.
+config IP_VS
+ tristate "IPVS"
+ depends on INET && NETFILTER
+config IP_VS_RR
+ tristate "IPVS round robin"
+ depends on IP_VS
+config IP_VS_PROTO_TCP
+ bool "IPVS TCP"
+ depends on IP_VS
+config IP_VS_PROTO_UDP
+ bool "IPVS UDP"
+ depends on IP_VS
+config IP_VS_IPV6
+ bool "IPVS IPv6"
+ depends on IP_VS && IPV6
+config NETFILTER_XT_MATCH_IPVS
+ tristate "IPVS match"
+ depends on IP_VS && NETFILTER_ADVANCED && NF_CONNTRACK

@@ -12,7 +12,8 @@ Copyright (C) 2026 Adrian
 - Check kernel.org for the latest stable kernel release.
 - Build with GCC or Clang, optional Clang ThinLTO, configurable parallel jobs and
   optional full debug information.
-- Scan hardware and use hardware-optimised build settings.
+- Scan hardware and use hardware-optimised settings that preserve normal Linux
+  platform and installed-software compatibility while pruning irrelevant drivers.
 - Follow live build output, inspect saved logs and clean up build source directories.
 - Install completed builds and select a GRUB default or one-time boot entry.
 - Configure GRUB menu visibility and timeout on supported systems.
@@ -93,10 +94,19 @@ new kernel. The installer refuses to overwrite an existing kernel release. With
 Secure Boot enabled, the new kernel and modules need appropriate signatures and
 an enrolled key before booting.
 
+Hardware Optimised mode deliberately retains common containers/firewalls, VPNs,
+filesystems, IPC/security and peripheral support even when currently unused. It
+also detects installed software with known kernel requirements. It aims to keep
+normal applications working, but cannot guarantee every third-party, out-of-tree
+or undocumented dependency. See the compatibility design and validation below.
+
 ## Further documentation
 
 - [Desktop launcher integration](docs/desktop-launcher.md)
 - [GRUB boot menu settings](docs/grub-menu-settings.md)
+- [Software compatibility architecture](docs/software-compatibility.md)
+- [Hardware compatibility validation](docs/hardware-compatibility-validation.md)
+- [Sandy Bridge configuration diagnosis](docs/sandy-bridge-config-validation.md)
 - [Container kernel diagnosis](docs/container-kernel-diagnosis.md)
 
 # License

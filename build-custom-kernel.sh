@@ -339,7 +339,7 @@ else
 fi
 
 # Update config for the new kernel version, keeping your existing choices
-make "${MAKE_ARGS[@]}" olddefconfig
+make "${MAKE_ARGS[@]}" olddefconfig < /dev/null
 
 # Keep the running kernel's module coverage; loaded modules alone do not
 # describe all hardware or filesystems needed at the next boot.
@@ -374,8 +374,8 @@ if $HARDWARE_OPTIMISED; then
   make "${MAKE_ARGS[@]}" olddefconfig < /dev/null
   # Always restore the broad peripheral safety set after localmodconfig.
   python3 "$SCRIPT_DIR/hardware_optimizer.py" apply .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Could not apply the compatibility safety set. Use Standard mode."
-  make "${MAKE_ARGS[@]}" olddefconfig
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Boot/network/container settings did not survive configuration validation. Use Standard mode."
+  make "${MAKE_ARGS[@]}" olddefconfig < /dev/null
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Boot/hardware/platform/software settings did not survive configuration validation. Use Standard mode."
 fi
 
 # Ubuntu/Debian kernels point CONFIG_SYSTEM_TRUSTED_KEYS and
@@ -403,18 +403,18 @@ else
   scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
 fi
 
-make "${MAKE_ARGS[@]}" olddefconfig
+make "${MAKE_ARGS[@]}" olddefconfig < /dev/null
 
 if $USE_LTO; then
   scripts/config --enable CONFIG_LTO_CLANG_THIN
   scripts/config --disable CONFIG_LTO_NONE
-  make "${MAKE_ARGS[@]}" olddefconfig
+  make "${MAKE_ARGS[@]}" olddefconfig < /dev/null
   grep -qx 'CONFIG_LTO_CLANG_THIN=y' .config || err "ThinLTO is not supported by this configuration/toolchain."
 fi
 
 # Validate the same inventory after every configuration edit, including LTO.
 if $HARDWARE_OPTIMISED; then
-  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/network/container validation failed. Use Standard mode."
+  python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/hardware/platform/software validation failed. Use Standard mode."
 fi
 
 # Invalidate completion before compiling and save arguments as data, not shell.

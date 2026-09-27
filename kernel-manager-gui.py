@@ -1221,7 +1221,7 @@ class KernelManagerApp:
         self.build_mode_var = tk.StringVar(value=("hardware" if self.presets.get("build_mode") == "hardware" else "standard"))
         ttk.Radiobutton(mode, text="Standard", variable=self.build_mode_var, value="standard").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Radiobutton(mode, text="Hardware Optimised", variable=self.build_mode_var, value="hardware").grid(row=0, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(mode, text="Targets this computer while retaining common removable and future peripherals.").grid(row=1, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Label(mode, text="Targets this hardware while retaining common platform and installed-software support.").grid(row=1, column=0, columnspan=3, sticky="w", padx=6)
         ttk.Button(mode, text="Scan Hardware…", command=self.scan_hardware).grid(row=0, column=2, padx=10)
 
         opts = ttk.LabelFrame(frame, text="Toolchain options")

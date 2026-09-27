@@ -4,6 +4,22 @@ Read-only inputs: `/boot/config-7.2.0-custom`, `/boot/config-7.2.6-optimized`,
 `/lib/modules/7.2.6-optimized/{kernel,modules.alias,modules.dep,modules.builtin,modules.builtin.modinfo}`,
 and the existing `/home/adrian/kernel-build/linux-7.2.6` Kconfig/Kbuild source.
 
+## September 25 redesign
+
+The later Acer report identifies Docker **29.8.1** failing during bridge-network
+initialisation on `iptables -t nat ... -m addrtype --dst-type LOCAL`. The earlier
+package snapshot below records 29.8.0; it is historical evidence, not the later
+installed version. Missing ADDRTYPE is the immediate failure, but the underlying
+model wrongly equated currently used drivers with userspace requirements.
+
+The [new architecture](software-compatibility.md) retains container/firewall
+infrastructure as a general baseline even without an installed runtime, adds
+extensible software profiles, and independently validates boot, hardware, baseline
+and applications. The [new native validation](hardware-compatibility-validation.md)
+reproduces rejection of the Acer defect without starting Docker, changing firewall
+rules, or building/installing a kernel. Historical results below describe the
+September 19 implementation; the new documents supersede its retention policy.
+
 ## Finding
 
 There are **no enabled-to-disabled losses** in the requested container surface,

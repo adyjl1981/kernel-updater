@@ -106,13 +106,15 @@ class ContainerConfigTests(unittest.TestCase):
         with (self.root / 'net/Kconfig').open('a') as stream:
             stream.write('config RPMSG\n tristate\n'
                          'config RPMSG_NS\n tristate "Remote processor name service"\n depends on RPMSG\n'
-                         'config BLK_CGROUP_UNUSED_FS_HELPER\n bool\n')
+                         'config BLK_CGROUP_UNUSED_FS_HELPER\n bool\n'
+                         'config BLK_CGROUP_FC_APPID\n bool "hardware accounting"\n')
         with self.baseline.open('a') as stream:
-            stream.write('CONFIG_RPMSG=m\nCONFIG_RPMSG_NS=m\nCONFIG_BLK_CGROUP_UNUSED_FS_HELPER=y\n')
+            stream.write('CONFIG_RPMSG=m\nCONFIG_RPMSG_NS=m\nCONFIG_BLK_CGROUP_UNUSED_FS_HELPER=y\nCONFIG_BLK_CGROUP_FC_APPID=y\n')
         required = hw.container_requirements(self.report, self.baseline, self.root)
         self.assertNotIn('RPMSG_NS', required)
         self.assertNotIn('RPMSG', required)
         self.assertNotIn('BLK_CGROUP_UNUSED_FS_HELPER', required)
+        self.assertNotIn('BLK_CGROUP_FC_APPID', required)
         self.assertTrue(hw.CONTAINER_REQUIRED <= required.keys())
 
     def test_missing_source_or_baseline_fails_closed(self):
@@ -126,11 +128,11 @@ class ContainerConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'CONFIG_VETH'):
             self.apply()
 
-    def test_no_runtime_does_not_add_container_floor(self):
+    def test_no_runtime_still_retains_general_container_baseline(self):
         self.report.container_runtimes = {}
         self.apply()
-        self.assertNotIn('OVERLAY_FS', hw._config_values(self.config))
-        self.assertNotIn('VETH', hw._config_values(self.config))
+        self.assertIn('OVERLAY_FS', hw._config_values(self.config))
+        self.assertIn('VETH', hw._config_values(self.config))
 
     def test_target_bool_type_and_builtin_baseline_are_respected(self):
         path = self.root / 'net/Kconfig'
@@ -143,14 +145,15 @@ class ContainerConfigTests(unittest.TestCase):
         self.assertEqual(values['OVERLAY_FS'], 'y')
 
     def test_real_kconfig_resolution_and_dependency_rejection(self):
-        candidates = list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf'))
+        candidates = ([Path(os.environ['KERNEL_KCONFIG_CONF'])] if os.environ.get('KERNEL_KCONFIG_CONF') else list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf')))
         if not candidates:
             self.skipTest('Kconfig conf executable unavailable')
         self.apply()
         env = dict(os.environ, KCONFIG_CONFIG=str(self.config))
         def resolve():
             return subprocess.run([str(candidates[0]), '--olddefconfig', str(self.root / 'net/Kconfig')],
-                                  cwd=self.root, env=env, check=True, capture_output=True, text=True)
+                                  cwd=self.root, env=env, stdin=subprocess.DEVNULL,
+                                  check=True, capture_output=True, text=True, timeout=30)
         self.assertEqual(resolve().stderr, '')
         hw.verify_containers(self.config, self.report, self.baseline, self.root)
         self.config.write_text(self.config.read_text().replace('CONFIG_NETFILTER=y', '# CONFIG_NETFILTER is not set'))
@@ -161,10 +164,10 @@ class ContainerConfigTests(unittest.TestCase):
 
 class InstalledKconfigIntegrationTests(unittest.TestCase):
     def test_actual_726_config_resolves_without_building_kernel(self):
-        source = Path('/home/adrian/kernel-build/linux-7.2.6')
-        baseline = Path('/boot/config-7.2.0-custom')
+        source = Path(os.environ.get('KERNEL_SOURCE_726', '/home/adrian/kernel-build/linux-7.2.6'))
+        baseline = Path(os.environ.get('KERNEL_BASELINE_CONFIG', '/boot/config-7.2.0-custom'))
         optimized = Path('/boot/config-7.2.6-optimized')
-        conf = source / 'scripts/kconfig/conf'
+        conf = Path(os.environ.get('KERNEL_KCONFIG_CONF', str(source / 'scripts/kconfig/conf')))
         if not all(p.exists() for p in (conf, baseline, optimized)):
             self.skipTest('Installed 7.2.6 Kconfig/conf and comparison configs unavailable')
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,7 +180,8 @@ class InstalledKconfigIntegrationTests(unittest.TestCase):
                        ARCH='x86', SRCARCH='x86', CC='gcc', LD='ld', HOSTCC='gcc',
                        RUSTC='rustc', PAHOLE_VERSION='0')
             resolved = subprocess.run([str(conf), '--olddefconfig', str(source / 'Kconfig')],
-                                      cwd=tmp, env=env, check=True, capture_output=True, text=True)
+                                      cwd=tmp, env=env, stdin=subprocess.DEVNULL,
+                                      check=True, capture_output=True, text=True, timeout=120)
             self.assertEqual(resolved.stderr, '')
             hw.verify_config(config, report, baseline, source)
 

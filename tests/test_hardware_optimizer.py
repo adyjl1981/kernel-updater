@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,7 +77,7 @@ class ConfigSafetyTests(unittest.TestCase):
     def test_usb_bool_gates_survive_kconfig_and_respect_dependencies(self):
         import os
         import subprocess
-        candidates = list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf'))
+        candidates = ([Path(os.environ['KERNEL_KCONFIG_CONF'])] if os.environ.get('KERNEL_KCONFIG_CONF') else list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf')))
         if not candidates:
             self.skipTest('Kconfig conf executable unavailable')
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,6 +219,16 @@ config MT792x_LIB
 config EXTERNAL_HELPER
  tristate
 ''')
+        # The platform floor exists independently of this network fixture.
+        import re
+        defined = set(re.findall(r'^config (\w+)', (self.root / 'Kconfig').read_text() +
+                                 (self.root / 'drivers/net/Kconfig').read_text(), re.M))
+        container = (Path(__file__).parent / 'fixtures/container/Kconfig').read_text()
+        blocks = re.split(r'^config (\w+)\n', container, flags=re.M)
+        with (self.root / 'Kconfig').open('a') as stream:
+            for name, body in zip(blocks[1::2], blocks[2::2]):
+                if name not in defined:
+                    stream.write('config ' + name + '\n' + body)
         (self.root / 'drivers/net/Makefile').write_text(
             'obj-$(CONFIG_OTHER_VENDOR_PCI) += arbitrary-pci.o\n')
         self.baseline = self.root / 'working.config'
@@ -265,15 +276,11 @@ config EXTERNAL_HELPER
     def test_actual_kconfig_rejects_old_module_value_for_bool(self):
         import os
         import subprocess
-        candidates = list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf'))
+        candidates = ([Path(os.environ['KERNEL_KCONFIG_CONF'])] if os.environ.get('KERNEL_KCONFIG_CONF') else list(Path('/home/adrian/kernel-build').glob('linux-*/scripts/kconfig/conf')))
         if not candidates:
             self.skipTest('Kconfig conf executable unavailable')
         kconfig = self.root / 'minimal.Kconfig'
-        kconfig.write_text('''config MODULES
- bool "Modules"
- modules
- default y
-source "drivers/net/Kconfig"
+        kconfig.write_text('''source "drivers/net/Kconfig"
 source "Kconfig"
 ''')
         self.config.write_text(self.baseline.read_text().replace('CONFIG_NETDEVICES=y', 'CONFIG_NETDEVICES=m'))
