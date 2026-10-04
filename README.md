@@ -102,7 +102,6 @@ or undocumented dependency. See the compatibility design and validation below.
 
 ## Further documentation
 
-- [Performance & Tuning — read-only interface discovery](docs/performance-tuning.md)
 - [Desktop launcher integration](docs/desktop-launcher.md)
 - [GRUB boot menu settings](docs/grub-menu-settings.md)
 - [Software compatibility architecture](docs/software-compatibility.md)

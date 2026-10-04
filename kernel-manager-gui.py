@@ -852,22 +852,8 @@ class KernelManagerApp:
         self.presets["dependency_check_completed"] = True
         self.on_check_dependencies(show_if_ready=False)
 
-    def open_tuning(self):
-        from tuning.gui import TuningWindow
-        view = getattr(self, "tuning_window", None)
-        if view is not None and not view.closed:
-            view.window.lift()
-            return
-        self.tuning_window = TuningWindow(self.root)
-
     def _build_tools_tab(self):
         frame = self.tools_tab
-        tuning = ttk.LabelFrame(frame, text="Performance & Tuning")
-        tuning.pack(fill="x", padx=4, pady=4)
-        ttk.Label(tuning, text="Discover CPU, power and thermal interfaces. Read-only; no settings are changed.",
-                  wraplength=700).pack(anchor="w", padx=8, pady=(8, 4))
-        ttk.Button(tuning, text="Open Performance & Tuning…", command=self.open_tuning).pack(
-            anchor="w", padx=8, pady=(4, 8))
         dependencies = ttk.LabelFrame(frame, text="Dependencies")
         dependencies.pack(fill="x", padx=4, pady=4)
         ttk.Label(

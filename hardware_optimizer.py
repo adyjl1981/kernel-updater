@@ -188,7 +188,6 @@ class HardwareReport:
     container_runtimes: dict[str, list[str]] = field(default_factory=dict)
     software: dict[str, list[str]] = field(default_factory=dict)
     hardware_devices: list[dict] = field(default_factory=list)
-    tuning: dict = field(default_factory=dict)
 
 
 class Scanner:
@@ -368,13 +367,9 @@ class Scanner:
                 if module:
                     hardware_devices.append({"device": str(device), "drivers": [module]})
         software = self.detect_software(warnings)
-        # Discovery shares fixture roots and never invokes authentication or writes.
-        from tuning import TuningManager
-        from tuning.fs import Sysfs
-        tuning = TuningManager(_fs=Sysfs(self.sys)).discover().evidence()
         return HardwareReport(arch, cpu, root_source, root_fs, boot_fs, pci, usb,
                               sorted(modules), categories, warnings, not reason, reason, network_devices,
-                              {k: v for k, v in software.items() if k in RUNTIMES}, software, hardware_devices, tuning)
+                              {k: v for k, v in software.items() if k in RUNTIMES}, software, hardware_devices)
 
 
 def render_report(r):
@@ -383,9 +378,6 @@ def render_report(r):
              f"Detected driver modules: {', '.join(r.modules) or 'none'}", ""]
     lines.append("Container runtimes: " + (", ".join(r.container_runtimes) or "none detected"))
     lines.append("Installed software compatibility: " + (", ".join(dict(r.container_runtimes, **r.software)) or "none detected"))
-    lines.append("Performance & Tuning interfaces (read-only): " +
-                 (", ".join(r.tuning.get("providers", [])) or "none detected"))
-    lines.extend("  Tuning discovery: " + note for note in r.tuning.get("diagnostics", []))
     lines.append("General compatibility: containers, VPN/tunnelling, printing, removable storage, Bluetooth, common filesystems")
     if r.container_runtimes:
         lines.append("  Retaining namespaces, cgroups, IPC, seccomp, overlayfs and container networking.")
@@ -655,76 +647,10 @@ def verify_capability_groups(path, category, groups):
             raise RuntimeError(f"{category} / {name} compatibility failed: required {details} did not survive final configuration")
 
 
-def tuning_requirements(report, baseline, source, catalog=None):
-    """Preserve working interface families, never enable tuning on absent hardware.
-
-    Select baseline-enabled, prompted symbols in the target subsystem Kconfig.
-    Native Kconfig resolves dependencies; final verification checks the result.
-    Core ABI gates are checked explicitly so their disappearance is not silent.
-    This also preserves built-in cpufreq/idle providers missed by lsmod.
-    """
-    providers = set(report.tuning.get("providers", []))
-    if not providers:
-        return {}
-    if not (baseline and source):
-        raise RuntimeError("tuning interface preservation requires a baseline and target Kconfig source")
-    working = _config_values(baseline)
-    catalog = catalog or kconfig_capabilities(source, working)
-    groups = {}
-    interface_drivers = {
-        "intel_pstate": "X86_INTEL_PSTATE", "intel_cpufreq": "X86_INTEL_PSTATE",
-        "amd-pstate": "X86_AMD_PSTATE", "amd-pstate-epp": "X86_AMD_PSTATE",
-        "acpi-cpufreq": "X86_ACPI_CPUFREQ", "cpufreq-dt": "CPUFREQ_DT",
-        "scmi-cpufreq": "ARM_SCMI_CPUFREQ", "scmi": "ARM_SCMI_CPUFREQ",
-        "intel_idle": "INTEL_IDLE", "acpi_idle": "ACPI_PROCESSOR_IDLE",
-        "acpitz": "ACPI_THERMAL",
-    }
-    for driver in report.tuning.get("drivers", []):
-        symbol = interface_drivers.get(driver)
-        if symbol and working.get(symbol) in ("y", "m"):
-            groups["Interface driver " + driver] = capability_closure(baseline, source, {symbol}, catalog)
-    families = {
-        "CPU frequency": ({"cpufreq", "intel-pstate", "amd-pstate"}, "drivers/cpufreq", {"CPU_FREQ"}),
-        "CPU idle": ({"cpuidle"}, "drivers/cpuidle", {"CPU_IDLE", "INTEL_IDLE", "ACPI_PROCESSOR_IDLE"}),
-        "Thermal": ({"thermal"}, "drivers/thermal", {"THERMAL"}),
-        "Hardware monitoring": ({"hwmon"}, "drivers/hwmon", {"HWMON"}),
-        "Power capping": ({"powercap"}, "drivers/powercap", {"POWERCAP"}),
-        "Platform profiles": ({"platform-profile"}, None, {"ACPI_PLATFORM_PROFILE"}),
-    }
-    for name, (matches, directory, gates) in families.items():
-        if not providers.intersection(matches):
-            continue
-        defined = set()
-        if directory:
-            for path in (Path(source) / directory).rglob("Kconfig*"):
-                if path.is_file():
-                    defined.update(re.findall(r"^\s*(?:menuconfig|config)\s+(\w+)", path.read_text(), re.M))
-        seeds = {symbol for symbol in defined & catalog[3] if working.get(symbol) in ("y", "m")}
-        seeds.update(symbol for symbol in gates if working.get(symbol) in ("y", "m"))
-        if name == "Platform profiles":
-            # Platform handlers may be built in and absent from module inventory.
-            # Preserve working target symbols that explicitly depend on/select
-            # the profile core, without enabling all platform/x86 drivers.
-            seeds.update(symbol for symbol in catalog[3]
-                         if working.get(symbol) in ("y", "m")
-                         and catalog[1].get(symbol, set()).intersection(gates))
-        if seeds:
-            groups[name] = capability_closure(baseline, source, seeds, catalog)
-    # Preserve exact bound platform/sensor providers through target Kbuild mapping.
-    mapping = network_driver_symbols(source, ("drivers",))
-    for module in report.tuning.get("modules", []):
-        seeds = {symbol for symbol in mapping.get(module, ()) if working.get(symbol) in ("y", "m")}
-        if seeds:
-            groups["Driver " + module] = capability_closure(baseline, source, seeds, catalog)
-    return groups
-
-
 def update_config(path, report, baseline=None, source=None):
     """Apply required values without touching an installed kernel config."""
     if report.software and not (baseline and source):
         raise RuntimeError("installed-software preservation requires a baseline and target Kconfig source")
-    if report.tuning.get("providers") and not (baseline and source):
-        raise RuntimeError("tuning interface preservation requires a baseline and target Kconfig source")
     config = Path(path)
     values = {x: "y" for x in SAFETY_BUILTIN}
     values.update({x: "m" for x in SAFETY_MODULES})
@@ -744,7 +670,6 @@ def update_config(path, report, baseline=None, source=None):
     if source and baseline:
         for groups in (hardware_requirements(report, baseline, source, catalog),
                        compatibility_requirements(baseline, source, catalog),
-                       tuning_requirements(report, baseline, source, catalog),
                        software_requirements(report, baseline, source, catalog)):
             for expected in groups.values():
                 for k, v in expected.items():
@@ -775,8 +700,6 @@ def update_config(path, report, baseline=None, source=None):
 def verify_config(path, report, baseline=None, source=None):
     if report.software and not (baseline and source):
         raise RuntimeError("installed-software preservation requires a baseline and target Kconfig source")
-    if report.tuning.get("providers") and not (baseline and source):
-        raise RuntimeError("tuning interface preservation requires a baseline and target Kconfig source")
     text = Path(path).read_text()
     values = dict(re.findall(r"^(CONFIG_[A-Za-z0-9_]+)=([ym])$", text, re.M))
     required = {"CONFIG_MODULES", "CONFIG_BLOCK", "CONFIG_BLK_DEV_INITRD",
@@ -813,7 +736,6 @@ def verify_config(path, report, baseline=None, source=None):
         verify_capability_groups(path, "Detected hardware", hardware_requirements(report, baseline, source, catalog))
         verify_capability_groups(path, "Installed software", software_requirements(report, baseline, source, catalog))
         verify_capability_groups(path, "General baseline", compatibility_requirements(baseline, source, catalog))
-        verify_capability_groups(path, "Performance interfaces", tuning_requirements(report, baseline, source, catalog))
 
 
 def main():
@@ -826,8 +748,13 @@ def main():
     parser.add_argument("--save-report", help="Save the hardware scan for all build stages")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    report = (HardwareReport(**json.loads(Path(args.report).read_text()))
-              if args.report else Scanner().scan())
+    if args.report:
+        saved = json.loads(Path(args.report).read_text())
+        # Ignore retired report fields so existing saved scans remain usable.
+        report = HardwareReport(**{key: value for key, value in saved.items()
+                                   if key in HardwareReport.__dataclass_fields__})
+    else:
+        report = Scanner().scan()
     if args.save_report:
         Path(args.save_report).write_text(json.dumps(asdict(report), indent=2))
     if args.action == "scan": print(json.dumps(asdict(report), indent=2) if args.json else render_report(report))

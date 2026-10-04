@@ -1,8 +1,0 @@
-{
-  "devices/system/cpu/cpufreq/policy4/affected_cpus": "4 5",
-  "devices/system/cpu/cpufreq/policy4/scaling_driver": "fixture-generic",
-  "devices/system/cpu/cpufreq/policy4/scaling_governor": "schedutil",
-  "devices/system/cpu/cpufreq/policy4/scaling_available_governors": "schedutil performance",
-  "devices/system/cpu/cpufreq/policy4/cpuinfo_cur_freq": "1500000",
-  "devices/system/cpu/cpufreq/boost": "0"
-}
