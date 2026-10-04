@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import subprocess
+import queue
+import threading
 import tkinter as tk
 from tkinter import font, ttk
 
@@ -13,21 +15,75 @@ LIGHT = {
     "window": "#F6F5F4", "surface": "#FFFFFF", "text": "#2E2E2E",
     "muted": "#5E5C64", "border": "#8D8A86", "button": "#EBE9E7",
     "hover": "#E0DDDA", "pressed": "#D2CFCC", "disabled": "#73706D",
-    # A deeper Ubuntu orange keeps white button/selection text readable.
-    "accent": "#C34113", "accent_hover": "#AD390F", "accent_pressed": "#96310D",
-    "accent_text": "#FFFFFF", "focus": "#C34113", "inactive_selection": "#ECD9D1",
 }
 DARK = {
     "window": "#242424", "surface": "#303030", "text": "#F6F5F4",
     "muted": "#C0BFBC", "border": "#85817D", "button": "#3D3D3D",
     "hover": "#494949", "pressed": "#555555", "disabled": "#ABA7A3",
-    "accent": "#E95420", "accent_hover": "#F46B39", "accent_pressed": "#FF875A",
-    "accent_text": "#171717", "focus": "#FF9366", "inactive_selection": "#604236",
 }
 
 
+# Ubuntu Yaru's common/accent-colors.scss.in; GNOME names are aliases below.
+ACCENTS = {
+    "default": "#E95420", "orange": "#E95420", "bark": "#787859",
+    "sage": "#657B69", "olive": "#4B8501", "viridian": "#03875B",
+    "prussiangreen": "#308280", "blue": "#0073E5", "purple": "#7764D8",
+    "magenta": "#B34CB3", "red": "#DA3450", "yellow": "#C88800",
+    "wartybrown": "#B39169", "mate": "#87A556",
+    "teal": "#308280", "green": "#4B8501", "pink": "#B34CB3",
+    "slate": "#657B69", "brown": "#B39169",
+}
+
+
+def detect_accent(preferences):
+    value = preferences.get("accent-color")
+    if isinstance(value, str) and value in ACCENTS:
+        return ACCENTS[value]
+    # Before GNOME 47 Ubuntu's appearance panel selected a Yaru GTK variant.
+    # Only recognize exact stock names; never infer appearance from theme names.
+    theme = preferences.get("gtk-theme", "")
+    if isinstance(theme, str):
+        match = re.fullmatch(r"Yaru(?:-([a-z]+))?(?:-dark)?", theme)
+        if match:
+            return ACCENTS.get(match[1] or "default", ACCENTS["default"])
+    return ACCENTS["default"]
+
+
+def luminance(color):
+    rgb = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in rgb]
+    return sum(v * weight for v, weight in zip(linear, (.2126, .7152, .0722)))
+
+
+def contrast(first, second):
+    low, high = sorted((luminance(first), luminance(second)))
+    return (high + .05) / (low + .05)
+
+
+def mix(first, second, amount):
+    return "#" + "".join(f"{round(int(first[i:i+2], 16) * (1-amount) + int(second[i:i+2], 16) * amount):02X}"
+                         for i in (1, 3, 5))
+
+
+def palette(preferences):
+    colors = dict(DARK if preferences.get("color-scheme") == "prefer-dark" else LIGHT)
+    accent = detect_accent(preferences)
+    ink = max(("#000000", "#FFFFFF"), key=lambda c: contrast(c, accent))
+    # Move toward the opposite of the text so hover/pressed retain text contrast.
+    target = "#FFFFFF" if ink == "#000000" else "#000000"
+    focus = accent
+    for step in range(1, 101):
+        if min(contrast(focus, colors[k]) for k in ("window", "surface")) >= 3:
+            break
+        focus = mix(accent, "#FFFFFF" if preferences.get("color-scheme") == "prefer-dark" else "#000000", step / 100)
+    colors.update(accent=accent, accent_text=ink, accent_hover=mix(accent, target, .10),
+                  accent_pressed=mix(accent, target, .20), focus=focus,
+                  inactive_selection=mix(colors["surface"], accent, .18))
+    return colors
+
+
 def desktop_preferences():
-    """Read GNOME's explicit preference once; never infer it from a theme name.
+    """Read supported GNOME settings without changing desktop preferences.
 
     Other desktops, missing schemas, and unavailable session buses use light
     Ubuntu defaults. No daemon, theme package, or Python GNOME binding is needed.
@@ -42,7 +98,7 @@ def desktop_preferences():
         )
         if proc.returncode:
             return {}
-        wanted = {"color-scheme", "font-name", "monospace-font-name", "text-scaling-factor"}
+        wanted = {"color-scheme", "font-name", "monospace-font-name", "text-scaling-factor", "accent-color", "gtk-theme"}
         values = {}
         for line in proc.stdout.splitlines():
             fields = line.split(None, 2)
@@ -70,8 +126,9 @@ def choose_font(description, available, fallbacks, default_size):
 
 
 def apply_theme(root, preferences=None):
-    preferences = desktop_preferences() if preferences is None else preferences
-    colors = dict(DARK if preferences.get("color-scheme") == "prefer-dark" else LIGHT)
+    automatic = preferences is None
+    preferences = desktop_preferences() if automatic else preferences
+    colors = palette(preferences)
     root._ubuntu_colors = colors
     style = ttk.Style(root)
     style.theme_use("clam")  # Built into Tk; all colours are controllable on Linux.
@@ -79,9 +136,11 @@ def apply_theme(root, preferences=None):
     available = font.families(root)
     default = font.nametofont("TkDefaultFont", root=root)
     fixed = font.nametofont("TkFixedFont", root=root)
+    if not hasattr(root, "_ubuntu_font_sizes"):
+        root._ubuntu_font_sizes = max(11, abs(default.actual("size")))
     family, size = choose_font(preferences.get("font-name"), available,
                                ("Ubuntu Sans", "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans", default.actual("family")),
-                               max(11, abs(default.actual("size"))))
+                               root._ubuntu_font_sizes)
     mono, mono_size = choose_font(preferences.get("monospace-font-name"), available,
                                   ("Ubuntu Sans Mono", "Ubuntu Mono", "DejaVu Sans Mono", fixed.actual("family")), size)
     scale = preferences.get("text-scaling-factor", 1.0)
@@ -131,6 +190,7 @@ def apply_theme(root, preferences=None):
     style.map("Accent.TButton", background=accent_map, lightcolor=accent_map, darkcolor=accent_map,
               foreground=[("disabled", colors["disabled"]), ("!disabled", colors["accent_text"])],
               bordercolor=[("focus", colors["focus"]), ("disabled", colors["border"]), ("!focus", colors["accent"])])
+    # Use Clam's supported indicator colours without replacing native elements.
     for name in ("TCheckbutton", "TRadiobutton"):
         style.configure(name, padding=(2, 5), indicatormargin=(1, 1, 8, 1),
                         indicatorbackground=colors["surface"], indicatorforeground=colors["text"])
@@ -149,8 +209,8 @@ def apply_theme(root, preferences=None):
     style.configure("TNotebook", borderwidth=0, tabmargins=(0, 0, 0, 8))
     style.configure("TNotebook.Tab", padding=(12, 9), background=colors["button"])
     style.map("TNotebook.Tab", padding=[("selected", (12, 9))],
-              background=[("selected", colors["surface"]), ("active", colors["hover"])],
-              foreground=[("selected", colors["text"])],
+              background=[("selected", colors["accent"]), ("active", colors["hover"])],
+              foreground=[("selected", colors["accent_text"])],
               lightcolor=[("selected", colors["accent"])], bordercolor=[("selected", colors["accent"])])
     style.configure("TLabelframe", relief="solid", borderwidth=1, padding=(8, 6))
     style.configure("TLabelframe.Label", font="TkHeadingFont", padding=(4, 0))
@@ -165,13 +225,70 @@ def apply_theme(root, preferences=None):
     for name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
         style.configure(name, background=colors["button"], arrowcolor=colors["text"], borderwidth=0, arrowsize=16)
         style.map(name, background=[("pressed", colors["pressed"]), ("active", colors["hover"])])
+    for name in ("Horizontal.TProgressbar", "Vertical.TProgressbar"):
+        style.configure(name, background=colors["accent"], lightcolor=colors["accent"],
+                        darkcolor=colors["accent"], troughcolor=colors["button"])
+    _refresh_classic(root)
+    root._ubuntu_preferences = dict(preferences)
+    if automatic and not getattr(root, "_ubuntu_watch_started", False):
+        _watch_preferences(root)
     return colors
+
+
+def _refresh_classic(widget):
+    if isinstance(widget, tk.Toplevel):
+        widget.configure(background=widget._root()._ubuntu_colors["window"])
+    elif isinstance(widget, tk.Text):
+        options = text_options(widget)
+        # Preserve intentional UI font, geometry and padding.
+        for key in ("font", "padx", "pady", "borderwidth", "relief", "highlightthickness", "insertwidth"):
+            options.pop(key)
+        widget.configure(**options)
+    for child in widget.winfo_children():
+        _refresh_classic(child)
+
+
+def _watch_preferences(root):
+    """Bounded reads off the Tk thread; all widget changes stay on that thread."""
+    root._ubuntu_watch_started = True
+    results = queue.Queue()
+    after_id = None
+
+    def schedule(delay, callback):
+        nonlocal after_id
+        after_id = root.after(delay, callback)
+
+    def destroyed(event):
+        if event.widget is root and after_id is not None:
+            root.after_cancel(after_id)
+
+    root.bind("<Destroy>", destroyed, add="+")
+
+    def read():
+        results.put(desktop_preferences())
+
+    def start():
+        threading.Thread(target=read, daemon=True).start()
+        schedule(100, collect)
+
+    def collect():
+        try:
+            preferences = results.get_nowait()
+        except queue.Empty:
+            schedule(100, collect)
+            return
+        # A transient bus failure must not erase a valid desktop preference.
+        if preferences and preferences != root._ubuntu_preferences:
+            apply_theme(root, preferences)
+        schedule(3000, start)
+
+    schedule(3000, start)
 
 
 def text_options(parent):
     """Text has no ttk equivalent; give it the same surfaces and focus states."""
     root = parent._root()
-    colors = getattr(root, "_ubuntu_colors", LIGHT)
+    colors = getattr(root, "_ubuntu_colors", palette({}))
     return dict(font="TkFixedFont", background=colors["surface"], foreground=colors["text"],
                 insertbackground=colors["text"], selectbackground=colors["accent"],
                 selectforeground=colors["accent_text"], inactiveselectbackground=colors["inactive_selection"],
