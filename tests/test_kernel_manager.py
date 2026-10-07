@@ -436,6 +436,17 @@ class GuiStateTests(unittest.TestCase):
         optimised = self.app._start_stream.call_args.args[0]
         self.assertIn("--hardware-optimised", optimised)
 
+    def test_update_check_skips_closed_window_and_pending_request(self):
+        self.app._read_async = mock.Mock()
+        self.app.update_label = mock.Mock()
+        self.app.closed = True
+        self.app.check_for_updates()
+        self.app.closed = False
+        self.app.reads_pending.add("Update check")
+        self.app.check_for_updates()
+        self.app._read_async.assert_not_called()
+        self.app.update_label.config.assert_not_called()
+
     def test_newer_running_kernel_is_not_an_update(self):
         with mock.patch.object(gui, "latest_stable_version", return_value="6.9.1"), mock.patch.object(gui, "running_kernel", return_value="6.10.0-custom"):
             self.app.update_label = mock.Mock()
@@ -1083,9 +1094,12 @@ class AdditionalRegressionTests(unittest.TestCase):
         class Widget:
             def __init__(self, *args, **kwargs):
                 self.rows = {}
+                self.callbacks = []
                 self.kwargs = kwargs
             def __getattr__(self, name):
                 return lambda *args, **kwargs: None
+            def after(self, delay, callback):
+                self.callbacks.append((delay, callback))
             def get_children(self):
                 return list(self.rows)
             def insert(self, *args, **kwargs):
@@ -1120,6 +1134,11 @@ class AdditionalRegressionTests(unittest.TestCase):
             self.assertIs(app.tools_dependency_btn.kwargs["command"].__func__, gui.KernelManagerApp.on_check_dependencies)
             self.assertIsNone(app.busy)
             self.assertFalse(app.build_cancellable)
+            startup_checks = [callback for delay, callback in app.root.callbacks
+                              if delay == 0 and callback == app.check_for_updates]
+            self.assertEqual(len(startup_checks), 1)
+            startup_checks[0]()
+            self.assertEqual(app._read_async.call_args.args[0], "Update check")
 
 
 if __name__ == "__main__":

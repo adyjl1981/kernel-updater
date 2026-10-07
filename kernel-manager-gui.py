@@ -796,6 +796,7 @@ class KernelManagerApp:
 
         self.refresh_installed()
         self._restore_completed_build()
+        self.root.after(0, self.check_for_updates)
         self.root.after(100, self._poll_log_queue)
         self.root.after(1000, self._update_resource_monitor)
         if initial_check_needed(self.presets):
@@ -1140,6 +1141,8 @@ class KernelManagerApp:
         self._read_async("Installed kernels", list_installed_kernels, done)
 
     def check_for_updates(self):
+        if self.closed or "Update check" in self.reads_pending:
+            return
         self.update_label.config(text="Checking kernel.org for the latest stable release…")
 
         def worker():
