@@ -44,6 +44,7 @@ from dependency_checker import (check_dependencies, initial_check_needed,
                                 install_packages, packages_to_install)
 from hardware_optimizer import Scanner, render_report
 import grub_menu
+import build_resources
 from desktop_launcher import APP_CLASS, launcher_is_current, install_launcher
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -854,7 +855,15 @@ class KernelManagerApp:
         self.on_check_dependencies(show_if_ready=False)
 
     def _build_tools_tab(self):
-        frame = self.tools_tab
+        canvas = tk.Canvas(self.tools_tab, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tools_tab, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        frame = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
         dependencies = ttk.LabelFrame(frame, text="Dependencies")
         dependencies.pack(fill="x", padx=4, pady=4)
         ttk.Label(
@@ -898,6 +907,85 @@ class KernelManagerApp:
         self.grub_menu_apply_btn.pack(side="left")
         ttk.Button(actions, text="Refresh GRUB Setting", command=self.refresh_grub_menu).pack(side="left", padx=8)
         self.refresh_grub_menu()
+        self._build_grub_display(frame)
+
+    GRUB_DISPLAY_MODES = ("auto", "1024x768", "1280x720", "1920x1080")
+
+    def _build_grub_display(self, frame):
+        display = ttk.LabelFrame(frame, text="GRUB Display Resolution")
+        display.pack(fill="x", padx=4, pady=8)
+        self.grub_display_mode = tk.StringVar(value="auto")
+        self.grub_display_keep = tk.BooleanVar(value=False)
+        self.grub_display_status = ttk.Label(display, text="Reading active settings…", wraplength=730)
+        self.grub_display_status.pack(anchor="w", padx=8, pady=4)
+        ttk.Label(display, text="Choose a common resolution, or auto for the safest default. Each resolution includes an auto fallback.",
+                  wraplength=730).pack(anchor="w", padx=8, pady=4)
+        ttk.Combobox(display, textvariable=self.grub_display_mode, values=self.GRUB_DISPLAY_MODES, state="readonly", width=24).pack(anchor="w", padx=8)
+        ttk.Checkbutton(display, text="Keep GRUB graphics mode for Linux (GRUB_GFXPAYLOAD_LINUX=keep)",
+                        variable=self.grub_display_keep).pack(anchor="w", padx=8, pady=4)
+        ttk.Label(display, text="Safe defaults: auto and keep unchecked (distribution payload default). Linux framebuffer size does not prove firmware/GRUB mode support. "
+                  "Check supported modes with videoinfo at the GRUB command prompt. Keeping payload can cause early boot display problems.",
+                  wraplength=730).pack(anchor="w", padx=8, pady=4)
+        actions = ttk.Frame(display)
+        actions.pack(fill="x", padx=8, pady=8)
+        self.grub_display_apply_btn = ttk.Button(actions, text="Apply Display Settings and Regenerate GRUB…", command=self.on_apply_grub_display)
+        self.grub_display_apply_btn.pack(side="left")
+        ttk.Button(actions, text="Refresh", command=self.refresh_grub_display).pack(side="left", padx=8)
+        self.refresh_grub_display()
+
+    def refresh_grub_display(self):
+        self.grub_display_original = None
+        self.grub_display_apply_btn.configure(state="disabled")
+        def read():
+            try:
+                grub_menu.check_overrides("/etc/default/grub.d", grub_menu.DISPLAY_PATTERN)
+                original = GRUB_DEFAULTS_FILE.read_text()
+                return original, grub_menu.display_values(original), None
+            except (OSError, ValueError) as error:
+                return None, {}, str(error)
+        def done(result):
+            original, values, error = result
+            self.grub_display_original = original
+            mode = values.get('GRUB_GFXMODE', 'auto')
+            editable = mode[:-5] if mode.endswith(',auto') else mode
+            if editable not in self.GRUB_DISPLAY_MODES:
+                editable = 'auto'
+            self.grub_display_mode.set(editable)
+            self.grub_display_keep.set(values.get('GRUB_GFXPAYLOAD_LINUX') == 'keep')
+            self.grub_display_status.configure(text=error or
+                f"Active configuration: GRUB_GFXMODE={values.get('GRUB_GFXMODE', '(unset; GRUB default)')}; "
+                f"GRUB_GFXPAYLOAD_LINUX={values.get('GRUB_GFXPAYLOAD_LINUX', '(unset; distribution default)')}. "
+                "These are configured values, not a measured boot mode. Settings outside the selectable options are shown here; applying replaces them with the selected option.")
+            self.grub_display_apply_btn.configure(state="disabled" if error else "normal")
+        self._read_async("GRUB display settings", read, done)
+
+    def on_apply_grub_display(self):
+        original = self.grub_display_original
+        if original is None:
+            messagebox.showerror("GRUB Display Resolution", "Refresh the configuration first.")
+            return
+        mode, keep = self.grub_display_mode.get(), self.grub_display_keep.get()
+        try:
+            updated = grub_menu.display_config(original, (mode, keep))
+            changes = ''.join(grub_menu.difflib.unified_diff(original.splitlines(True), updated.splitlines(True))) or 'No file changes; regenerate only.'
+        except ValueError as error:
+            messagebox.showerror("GRUB Display Resolution", str(error))
+            return
+        if not messagebox.askyesno("Apply GRUB Display Resolution", changes + "\n\nBack up defaults and the generated menu, then regenerate GRUB using the installed distribution tool. "
+                "Unsupported modes may fall back to auto. Recovery: use auto with keep unchecked, or restore the backup paths shown in the operation log with administrator privileges. Continue?"):
+            return
+        def work(log):
+            with tempfile.TemporaryDirectory(prefix="kernel-manager-grub-request-") as directory:
+                request = Path(directory) / "request.json"
+                request.write_text(json.dumps(dict(action='display', original=original, mode=mode, keep=keep)))
+                run_command(["sudo", "-A", sys.executable, SCRIPT_DIR / "grub_menu.py", request], gui_env(), log)
+        def completed(success):
+            self.refresh_grub_display()
+            if success:
+                messagebox.showinfo("GRUB Display Resolution", "Settings applied and GRUB regenerated. Backup paths are in the operation log.")
+            else:
+                messagebox.showerror("GRUB Display Resolution", "Apply failed. See the operation log for errors, rollback status and backup paths. Restore backups with administrator privileges if rollback was incomplete before rebooting.")
+        self._run_operation("Applying GRUB display settings", work, completed)
 
     def refresh_grub_menu(self):
         self.grub_menu_original = None
@@ -1253,9 +1341,16 @@ class KernelManagerApp:
 
         jobs_frame = ttk.Frame(opts)
         jobs_frame.grid(row=2, column=2, sticky="w", padx=6, pady=4)
-        ttk.Label(jobs_frame, text="Parallel jobs:").pack(side="left")
+        ttk.Label(jobs_frame, text="Manual jobs:").pack(side="left")
         self.jobs_var = tk.StringVar(value=str(self.presets.get("jobs", os.cpu_count() or 2)))
-        ttk.Spinbox(jobs_frame, from_=1, to=64, width=5, textvariable=self.jobs_var).pack(side="left", padx=4)
+        self.auto_jobs_var = tk.BooleanVar(value=self.presets.get("auto_jobs", True) is not False)
+        self.jobs_spinbox = ttk.Spinbox(jobs_frame, from_=1, to=max(64, os.cpu_count() or 1), width=5, textvariable=self.jobs_var)
+        self.jobs_spinbox.pack(side="left", padx=4)
+        ttk.Checkbutton(jobs_frame, text="Automatic", variable=self.auto_jobs_var,
+                        command=self._sync_jobs_state).pack(side="left")
+        self._sync_jobs_state()
+        ttk.Label(opts, text="Automatic jobs balance usable CPUs and available RAM, with extra allowance for ThinLTO/debug info. Recalculated at build start.",
+                  wraplength=730).grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=4)
 
         # Live resource monitor — updated every second regardless of whether
         # a build is running, so you can see memory pressure building before
@@ -1399,12 +1494,15 @@ class KernelManagerApp:
             "toolchain": self.toolchain_var.get(),
             "lto": self.lto_var.get(),
             "debug": self.debug_var.get(),
-            "jobs": self.jobs_var.get(),
+            "jobs": self.jobs_var.get(), "auto_jobs": self.auto_jobs_var.get(),
             "build_mode": self.build_mode_var.get(),
         }
         save_presets(self.presets)
         self.closed = True
         self.root.destroy()
+
+    def _sync_jobs_state(self):
+        self.jobs_spinbox.configure(state="disabled" if self.auto_jobs_var.get() else "normal")
 
     def start_build(self):
         needed = {"runtime", "build_toolchain", "build_headers", "build_utilities"}
@@ -1412,11 +1510,19 @@ class KernelManagerApp:
             needed.add("clang")
         if not self._dependencies_available(needed):
             return
-        jobs = self.jobs_var.get()
-        if not re.fullmatch(r"[1-9][0-9]*", jobs):
-            messagebox.showerror("Build", "Parallel jobs must be a positive integer.")
-            return
-        cmd = ["bash", str(BUILD_SCRIPT), "--jobs", jobs]
+        cmd = ["bash", str(BUILD_SCRIPT)]
+        self._jobs_estimate = None
+        if self.auto_jobs_var.get():
+            jobs, reason = build_resources.recommend_jobs(
+                lto=self.toolchain_var.get() == "clang" and self.lto_var.get(), debug=self.debug_var.get())
+            self._jobs_estimate = (f"Automatic estimate: {jobs} parallel jobs. {reason}\n"
+                                   "The build script will check resources again before selecting the final count.\n")
+        else:
+            jobs = self.jobs_var.get()
+            if not re.fullmatch(r"[1-9][0-9]*", jobs):
+                messagebox.showerror("Build", "Parallel jobs must be a positive integer.")
+                return
+            cmd.extend(["--jobs", jobs])
         if self.toolchain_var.get() == "clang":
             cmd.append("--clang")
             if self.lto_var.get():
@@ -1443,8 +1549,10 @@ class KernelManagerApp:
         if kind == "build":
             self.built_kernel_dir = None
             self._reset_build_output()
+            if getattr(self, "_jobs_estimate", None):
+                self._append_log(self._jobs_estimate)
             save_presets({"toolchain": self.toolchain_var.get(), "lto": self.lto_var.get(),
-                          "debug": self.debug_var.get(), "jobs": self.jobs_var.get(),
+                          "debug": self.debug_var.get(), "jobs": self.jobs_var.get(), "auto_jobs": self.auto_jobs_var.get(),
                           "build_mode": self.build_mode_var.get()})
         self._append_log(f"$ {shlex.join(cmd)} (in {cwd})\n")
         fd = self.operation_lock.fileno()

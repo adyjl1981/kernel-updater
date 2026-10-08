@@ -155,7 +155,8 @@ class LauncherGuiTests(unittest.TestCase):
     def test_tools_control_uses_same_install_action(self):
         self.app.tools_tab = mock.Mock()
         self.app.refresh_grub_menu = mock.Mock()
-        with mock.patch.object(gui.tk, "StringVar"), \
+        with mock.patch.object(gui.ttk, "Scrollbar"), mock.patch.object(gui.tk, "Canvas"), mock.patch.object(gui.tk, "BooleanVar"), \
+             mock.patch.object(self.app, "_build_grub_display"), mock.patch.object(gui.tk, "StringVar"), \
              mock.patch.object(self.app, "on_install_desktop_launcher") as install:
             self.app._build_tools_tab()
             self.buttons["Install / Update Desktop Launcher"]()

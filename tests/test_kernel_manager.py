@@ -369,7 +369,7 @@ class GuiStateTests(unittest.TestCase):
         app.refresh_installed = mock.Mock()
         app.refresh_maintenance_tab = mock.Mock()
         app.refresh_logs_tab = mock.Mock()
-        for name, value in (("jobs_var", "2"), ("toolchain_var", "gcc"), ("lto_var", False), ("debug_var", False), ("force_var", False), ("build_mode_var", "standard")):
+        for name, value in (("auto_jobs_var", False), ("jobs_var", "2"), ("toolchain_var", "gcc"), ("lto_var", False), ("debug_var", False), ("force_var", False), ("build_mode_var", "standard")):
             var = mock.Mock()
             var.get.return_value = value
             setattr(app, name, var)
@@ -584,6 +584,7 @@ class ShellIntegrationTests(unittest.TestCase):
             code = code.replace("arch/x86" + str(self.root / "system/boot"), "arch/x86/boot")
             code = code.replace("/lib/modules", str(self.root / "system/lib/modules"))
             (self.root / name).write_text(code)
+        shutil.copyfile(PROJECT / "build_resources.py", self.root / "build_resources.py")
         (self.root / "hardware_optimizer.py").write_text(
             "import pathlib,sys\n"
             "action=sys.argv[1]\n"
@@ -679,6 +680,30 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn(b"LOCALVERSION=-lab", args)
         self.assertEqual((self.tree / "include/config/kernel.release").read_text(), "9.9.9-lab")
 
+    def test_automatic_jobs_recheck_before_make_and_forward_heavy_options(self):
+        (self.root / "build_resources.py").write_text(
+            "from pathlib import Path\nimport sys\n"
+            "p=Path(__file__).with_name('resource-calls')\n"
+            "calls=p.read_text().splitlines() if p.exists() else []\n"
+            "p.write_text('\\n'.join(calls+[' '.join(sys.argv[1:])])+'\\n')\n"
+            "print(5 if not calls else 2)\n")
+        proc = self.run_script("build-custom-kernel.sh", "--clang", "--lto", "--full-debug-info")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        calls = (self.root / "resource-calls").read_text().splitlines()
+        self.assertEqual(calls, ['--lto --debug', '--lto --debug'])
+        compile_calls = [args for name, args in self.commands() if name == 'make' and '-j2' in args]
+        self.assertEqual(len(compile_calls), 1)
+        self.assertIn('LD=ld.lld --thinlto-jobs=2', compile_calls[0])
+
+    def test_auto_probe_failure_falls_back_and_manual_override_skips_probe(self):
+        (self.root / "build_resources.py").write_text("raise RuntimeError('unavailable')\n")
+        proc = self.run_script("build-custom-kernel.sh")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn('Resource detection failed; using one build job', proc.stdout)
+        self.assertTrue(any('-j1' in args for name, args in self.commands() if name == 'make'))
+        proc = self.build('--force')
+        self.assertNotIn('Resource detection failed', proc.stdout)
+
     def test_clang_lto_is_used_for_configuration_and_install(self):
         self.build("--clang", "--lto")
         proc = self.run_script("install-custom-kernel.sh", cwd=self.tree)
@@ -688,6 +713,8 @@ class ShellIntegrationTests(unittest.TestCase):
             self.assertIn("LLVM=1", args)
             self.assertIn("LOCALVERSION=-custom", args)
             self.assertIn("CC=ccache clang", args)
+        build_call = next(args for args in make_calls if '-j2' in args)
+        self.assertIn('LD=ld.lld --thinlto-jobs=2', build_call)
         targets = [args[-1] for args in make_calls]
         self.assertIn("modules_install", targets)
         self.assertIn("install", targets)
@@ -1117,8 +1144,9 @@ class AdditionalRegressionTests(unittest.TestCase):
             def set(self, value):
                 self.value = value
         with contextlib.ExitStack() as stack:
-            for name in ("Notebook", "Frame", "Button", "Label", "Treeview", "LabelFrame", "Radiobutton", "Checkbutton", "Spinbox", "Scrollbar", "Combobox"):
+            for name in ("Notebook", "Frame", "Button", "Label", "Treeview", "LabelFrame", "Radiobutton", "Checkbutton", "Spinbox", "Scrollbar", "Combobox", "Entry"):
                 stack.enter_context(mock.patch.object(gui.ttk, name, Widget))
+            stack.enter_context(mock.patch.object(gui.tk, "Canvas", Widget))
             stack.enter_context(mock.patch.object(gui.tk, "Text", Widget))
             stack.enter_context(mock.patch.object(gui.tk, "Menu", Widget))
             stack.enter_context(mock.patch.object(gui.tk, "StringVar", Variable))
@@ -1133,6 +1161,7 @@ class AdditionalRegressionTests(unittest.TestCase):
             self.assertIs(app.tools_dependency_btn.kwargs["command"].__self__, app)
             self.assertIs(app.tools_dependency_btn.kwargs["command"].__func__, gui.KernelManagerApp.on_check_dependencies)
             self.assertIsNone(app.busy)
+            self.assertTrue(app.auto_jobs_var.get())
             self.assertFalse(app.build_cancellable)
             startup_checks = [callback for delay, callback in app.root.callbacks
                               if delay == 0 and callback == app.check_for_updates]

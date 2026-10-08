@@ -1,6 +1,6 @@
 """Conservative GRUB menu configuration and atomic, backed-up transactions.
 
-Never source configuration while inspecting it. CLI writes only the fixed Ubuntu
+Never source configuration while inspecting it. CLI writes only the fixed system
 paths; tests call apply_setting with temporary paths and an injected updater.
 """
 import difflib
@@ -25,18 +25,21 @@ ASSIGNMENT = re.compile(r"^(?P<prefix>[ \t]*(?:export[ \t]+)?)(?P<key>" + KEY_PA
                         r")=(?P<value>'[^']*'|\"[^\"$`\\]*\"|[a-zA-Z0-9_-]*)(?P<tail>[ \t]+#.*|[ \t]*)(?P<end>\r?\n)?$")
 
 
-def assignments(text):
+def assignments(text, pattern=KEY_PATTERN):
     found = {}
     for index, line in enumerate(text.splitlines(keepends=True)):
         if line.lstrip().startswith('#'):
             continue
         if re.match(r'\s*(?:if|then|else|elif|fi|for|while|case|esac|source|eval|\.)\s', line) or line.rstrip().endswith('\\'):
             raise ValueError('Conditional, sourced or multiline GRUB configuration requires manual editing.')
-        if not re.search(r"\b" + KEY_PATTERN + r"\b", line):
+        if not re.search(r"\b" + pattern + r"\b", line):
             continue
-        match = ASSIGNMENT.fullmatch(line)
+        matcher = ASSIGNMENT if pattern == KEY_PATTERN else re.compile(
+            r"^(?P<prefix>[ \t]*(?:export[ \t]+)?)(?P<key>" + pattern +
+            r")=(?P<value>'[^']*'|\"[^\"$`\\]*\"|[a-zA-Z0-9_,x-]*)(?P<tail>[ \t]+#.*|[ \t]*)(?P<end>\r?\n)?$")
+        match = matcher.fullmatch(line)
         if not match:
-            raise ValueError(f"Unsupported or malformed GRUB menu setting on line {index + 1}; edit it manually first.")
+            raise ValueError(f"Unsupported or malformed GRUB setting on line {index + 1}; edit it manually first.")
         key = match['key']
         if key in found:
             raise ValueError(f"Duplicate {key}; resolve duplicate settings before applying.")
@@ -95,11 +98,11 @@ def preview(text, choice):
                                       tofile='/etc/default/grub (proposed)')) or 'No file changes; regenerate GRUB only.'
 
 
-def check_overrides(directory):
+def check_overrides(directory, pattern=KEY_PATTERN):
     """Refuse competing drop-in definitions instead of claiming a false state."""
     for path in sorted(Path(directory).glob('*.cfg')):
         for line in path.read_text().splitlines():
-            if not line.lstrip().startswith('#') and re.search(r'\b' + KEY_PATTERN + r'\b', line):
+            if not line.lstrip().startswith('#') and re.search(r'\b' + pattern + r'\b', line):
                 raise ValueError(f'{path} overrides GRUB menu settings; resolve this override first.')
 
 
@@ -136,14 +139,14 @@ def backup_file(path, suffix):
     return backup
 
 
-def apply_setting(defaults, generated, expected, choice, updater):
+def apply_setting(defaults, generated, expected, choice, updater, transform=menu_config):
     """Caller holds transaction lock. Snapshot both files before any mutation."""
     regular(defaults)
     regular(generated)
     original = defaults.read_bytes()
     if original.decode('utf-8') != expected:
         raise RuntimeError('GRUB configuration changed since confirmation. Refresh and try again.')
-    updated = menu_config(expected, choice).encode('utf-8')
+    updated = transform(expected, choice).encode('utf-8')
     suffix = '.kernel-manager-backup-' + uuid.uuid4().hex
     backup = backup_file(defaults, suffix)
     generated_backup = backup_file(generated, suffix)
@@ -172,8 +175,67 @@ def apply_setting(defaults, generated, expected, choice, updater):
                 except Exception as rollback_error:
                     failures.append(str(rollback_error))
         detail = 'Previous defaults and generated menu restored.' if not failures else 'Rollback incomplete: ' + '; '.join(failures)
-        raise RuntimeError(f'{error}. {detail} Backups: {backup}, {generated_backup}') from error
+        raise RuntimeError(f'{error}. {detail} Backups: {backup}, {generated_backup}. Recovery: restore these backups to their original paths with administrator privileges; if rollback was incomplete, do this before rebooting.') from error
     return f'GRUB menu setting applied. Backups: {backup}, {generated_backup}'
+
+
+
+DISPLAY_PATTERN = r'(?:GRUB_GFXMODE|GRUB_GFXPAYLOAD_LINUX)'
+
+
+def validate_mode(value):
+    """Validate syntax only; firmware capability must be checked in GRUB."""
+    if not isinstance(value, str):
+        raise ValueError('Enter auto or a resolution such as 1920x1080.')
+    value = value.strip()
+    if value == 'auto':
+        return value
+    if not re.fullmatch(r'[1-9][0-9]{0,4}x[1-9][0-9]{0,4}(?:x(?:8|15|16|24|32))?', value):
+        raise ValueError('Use auto or WIDTHxHEIGHT, optionally x8, x15, x16, x24 or x32. Mode support is not guaranteed.')
+    return value + ',auto'
+
+
+def display_values(text):
+    return {key: item[2] for key, item in assignments(text, DISPLAY_PATTERN).items()}
+
+
+def display_config(text, options):
+    mode, keep = options
+    mode = validate_mode(mode)
+    if type(keep) is not bool:
+        raise ValueError('Keep payload must be a boolean.')
+    found = assignments(text, DISPLAY_PATTERN)
+    lines = text.splitlines(keepends=True)
+    for key, value in (('GRUB_GFXMODE', mode), ('GRUB_GFXPAYLOAD_LINUX', 'keep' if keep else None)):
+        if key in found:
+            index, match, _ = found[key]
+            if value is None:
+                lines[index] = '# Disabled by Kernel Manager (payload default): ' + lines[index]
+            else:
+                lines[index] = f'{match["prefix"]}{key}="{value}"{match["tail"]}{match["end"] or ""}'
+        elif value is not None:
+            if lines and not lines[-1].endswith('\n'):
+                lines[-1] += '\n'
+            lines.append(f'{key}="{value}"\n')
+    return ''.join(lines)
+
+
+def regeneration_plan(boot=Path('/boot'), which=shutil.which):
+    """Only known installed layouts; never overwrite an EFI forwarding stub."""
+    candidates = []
+    for folder, tools in (('grub', ('update-grub', 'grub-mkconfig')), ('grub2', ('grub2-mkconfig',))):
+        target = boot / folder / 'grub.cfg'
+        if not target.exists():
+            continue
+        regular(target)
+        for tool in tools:
+            command = which(tool)
+            if command:
+                candidates.append((target, [command] if tool == 'update-grub' else [command, '-o', str(target)]))
+                break
+    if len(candidates) != 1:
+        raise RuntimeError('Missing or ambiguous GRUB layout/regeneration tool; no settings changed. Use your distribution GRUB instructions.')
+    return candidates[0]
 
 
 def main():
@@ -183,6 +245,13 @@ def main():
     # Stable separate lock: replacing the defaults inode must not release it.
     with open('/run/lock/kernel-manager-grub-menu.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if request.get('action') == 'display':
+            check_overrides('/etc/default/grub.d', DISPLAY_PATTERN)
+            generated, command = regeneration_plan()
+            print(apply_setting(defaults, generated, request['original'],
+                                (request['mode'], request['keep']),
+                                lambda: subprocess.run(command, check=True), display_config))
+            return
         check_overrides('/etc/default/grub.d')
         command = shutil.which('update-grub')
         if not command:

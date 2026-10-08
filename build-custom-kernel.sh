@@ -11,7 +11,7 @@
 #
 # USAGE:
 #   chmod +x build-custom-kernel.sh
-#   ./build-custom-kernel.sh              # GCC build, -march=native, ccache
+#   ./build-custom-kernel.sh              # GCC build, automatic CPU/RAM job selection
 #   ./build-custom-kernel.sh --clang --lto  # Clang+LLD with ThinLTO
 #   ./build-custom-kernel.sh --jobs 8     # override parallel job count
 #
@@ -51,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; LOCALVERSION_EXPLICIT=true; shift 2 ;;
     -h|--help)
       echo "Usage: $0 [--clang] [--lto] [--hardware-optimised] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
+      echo "  --jobs N           override automatic CPU/RAM-based parallel job selection."
       echo "  --lto              requires --clang. Not recommended on low-RAM/low-core machines."
       echo "  --force            rebuild even if this is the same version you last built."
       echo "  --full-debug-info  keep full debug info (DWARF + BTF). By default this script"
@@ -140,8 +141,25 @@ echo "  RAM:        ${MEM_GB} GB"
 [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]] && \
   warn "Untested architecture ($ARCH). Script assumes x86_64/aarch64 conventions."
 
+AUTO_JOBS=false
+select_auto_jobs() {
+  RESOURCE_OPTIONS=()
+  $USE_LTO && RESOURCE_OPTIONS+=(--lto)
+  $FULL_DEBUG_INFO && RESOURCE_OPTIONS+=(--debug)
+  if ! JOBS=$(python3 "$SCRIPT_DIR/build_resources.py" "${RESOURCE_OPTIONS[@]}"); then
+    warn "Resource detection failed; using one build job."
+    JOBS=1
+  fi
+  if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid resource recommendation; using one build job."
+    JOBS=1
+  fi
+}
 if [[ -z "$JOBS" ]]; then
-  JOBS=$NPROC
+  AUTO_JOBS=true
+  select_auto_jobs
+else
+  log "Manual parallel jobs: $JOBS"
 fi
 
 if (( MEM_GB < 8 )); then
@@ -415,6 +433,13 @@ fi
 # Validate the same inventory after every configuration edit, including LTO.
 if $HARDWARE_OPTIMISED; then
   python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/hardware/platform/software validation failed. Use Standard mode."
+fi
+
+# Downloads/configuration can take time: recheck headroom immediately before make.
+$AUTO_JOBS && select_auto_jobs
+if $USE_LTO; then
+  # Supply flags through the linker command, preserving Kbuild/architecture flags.
+  MAKE_ARGS+=( LD="ld.lld --thinlto-jobs=$JOBS" )
 fi
 
 # Invalidate completion before compiling and save arguments as data, not shell.

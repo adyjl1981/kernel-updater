@@ -34,7 +34,7 @@ if [[ -f .kernel-manager-make-args ]]; then
   sha256sum --status -c .kernel-manager-checksums || err "Build artifacts or settings changed. Rebuild before installing."
   mapfile -d '' -t MAKE_ARGS < .kernel-manager-make-args
   for arg in "${MAKE_ARGS[@]}"; do
-    [[ $arg =~ ^(LOCALVERSION|KCFLAGS|CC|LLVM|LLVM_IAS)= ]] || err "Invalid saved make argument."
+    [[ $arg =~ ^(LOCALVERSION|KCFLAGS|CC|LLVM|LLVM_IAS)= || $arg =~ ^LD=ld[.]lld[[:space:]]--thinlto-jobs=[1-9][0-9]*$ ]] || err "Invalid saved make argument."
   done
 fi
 RELEASE=$(cat include/config/kernel.release)

@@ -190,7 +190,10 @@ class GuiTests(unittest.TestCase):
         with mock.patch.object(gui.ttk, 'LabelFrame'), mock.patch.object(gui.ttk, 'Frame'), \
                 mock.patch.object(gui.ttk, 'Label'), mock.patch.object(gui.ttk, 'Button'), \
                 mock.patch.object(gui.ttk, 'Radiobutton') as radio, \
-                mock.patch.object(gui.tk, 'StringVar'):
+                mock.patch.object(gui.tk, 'StringVar'), mock.patch.object(gui.tk, 'Canvas'), \
+                mock.patch.object(gui.ttk, 'Scrollbar'), mock.patch.object(gui.ttk, 'Combobox'), \
+                mock.patch.object(gui.ttk, 'Checkbutton'), mock.patch.object(gui.tk, 'BooleanVar'), \
+                mock.patch.object(self.app, 'refresh_grub_display'):
             self.app._build_tools_tab()
         self.assertEqual([call.kwargs['value'] for call in radio.call_args_list], ['hidden', '5', '15'])
         for call in radio.call_args_list:
