@@ -16,7 +16,13 @@ may need additional discovery. Unknown values are displayed explicitly.
 
 ## One-time administrator setup
 
-Review `memory_helper.py` and `install-memory-helper.sh`, then run:
+Review `memory_helper.py` and `install-memory-helper.sh`, then choose **Helper Setup**
+and **Install Helper** in the dialog. Setup requests administrator authentication,
+runs in the background with an operation log, verifies the installed copy and
+refreshes memory readiness. Cancel closes the dialog without running setup.
+Authentication or installation failures appear in the log and a result dialog.
+
+Alternatively, run:
 
 ```sh
 sudo bash /home/adrian/Kernel/install-memory-helper.sh

@@ -951,12 +951,53 @@ class KernelManagerApp:
         self.refresh_memory()
 
     def on_memory_setup(self):
+        win = tk.Toplevel(self.root)
+        win.title("Memory Helper Setup")
+        win.transient(self.root)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=(
+            "Install or update the memory helper for this checkout.\n\n"
+            "Review memory_helper.py and install-memory-helper.sh before proceeding. "
+            "Setup installs a root-owned helper and private state directory. "
+            "It does not change swap or swappiness or add passwordless permissions.\n\n"
+            "Choose Install Helper to run setup with administrator authentication. "
+            "Progress appears in the operation log; memory readiness refreshes afterwards."),
+            wraplength=520, justify="left").pack(fill="x")
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(16, 0))
+
+        def install():
+            win.destroy()
+            self._install_memory_helper()
+
+        ttk.Button(buttons, text="Install Helper", style="Accent.TButton",
+                   command=install).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda event: win.destroy())
+        win.grab_set()
+
+    def _install_memory_helper(self):
         installer = SCRIPT_DIR / "install-memory-helper.sh"
-        command = shlex.join(["sudo", "bash", str(installer)])
-        messagebox.showinfo("Memory Helper Setup",
-            "Review memory_helper.py and install-memory-helper.sh, then run this once in a terminal:\n\n"
-            + command + "\n\nThis installs only the root-owned helper. It does not change swap or swappiness. "
-            "Refresh Memory afterwards. No passwordless permissions are added.", parent=self.root)
+        if not installer.is_file() or installer.is_symlink():
+            messagebox.showerror("Memory Helper Setup", "Setup script is missing or is a symlink.", parent=self.root)
+            return
+
+        def work(log):
+            run_command(["/usr/bin/sudo", "-A", "--", "/usr/bin/bash", str(installer)], gui_env(), log)
+            problem = memory_management.helper_error()
+            if problem:
+                raise RuntimeError("Setup completed but helper verification failed: " + problem)
+
+        def done(success):
+            self.refresh_memory()
+            if success:
+                messagebox.showinfo("Memory Helper Setup", "Helper installed and verified. Memory readiness is refreshing.", parent=self.root)
+            else:
+                messagebox.showerror("Memory Helper Setup", "Setup failed or authentication was cancelled. See the operation log for details.", parent=self.root)
+
+        self._run_operation("Install Memory Helper", work, done)
 
     def _selected_memory_device(self):
         selected = self.memory_devices.selection()

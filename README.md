@@ -152,7 +152,9 @@ not apply changes or populate a size control. Monitoring and assessment require
 neither the privileged helper nor authentication.
 
 To enable changes, review `memory_helper.py` and `install-memory-helper.sh`, then
-perform the one-time setup from the repository directory:
+choose **Helper Setup → Install Helper**. The dialog runs setup with sudo
+authentication, displays progress in the operation log and refreshes memory
+readiness afterwards. You can also run setup from the repository directory:
 
 ```sh
 sudo bash install-memory-helper.sh

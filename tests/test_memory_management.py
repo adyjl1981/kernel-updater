@@ -257,6 +257,57 @@ class GuiTests(unittest.TestCase):
         error.assert_called_once()
         self.assertNotIn('/../etc/passwd', app.memory_seen_paths)
 
+    def test_setup_dialog_requires_install_click(self):
+        app = self.app()
+        app._install_memory_helper = mock.Mock()
+        with mock.patch.object(gui.tk, 'Toplevel') as window, \
+                mock.patch.object(gui.ttk, 'Frame'), mock.patch.object(gui.ttk, 'Label'), \
+                mock.patch.object(gui.ttk, 'Button') as buttons:
+            app.on_memory_setup()
+        app._install_memory_helper.assert_not_called()
+        actions = {call.kwargs['text']: call.kwargs['command'] for call in buttons.call_args_list}
+        actions['Cancel']()
+        app._install_memory_helper.assert_not_called()
+        actions['Install Helper']()
+        app._install_memory_helper.assert_called_once()
+        window.return_value.destroy.assert_called()
+
+    def test_setup_runs_authenticated_installer_and_verifies(self):
+        app = self.app()
+        app.refresh_memory = mock.Mock()
+        app._install_memory_helper()
+        work, done = app._run_operation.call_args.args[1:]
+        log = mock.Mock()
+        with mock.patch.object(gui, 'run_command') as command, \
+                mock.patch.object(gui, 'gui_env', return_value={'SUDO_ASKPASS': '/fixture'}), \
+                mock.patch.object(memory, 'helper_error', return_value=None):
+            work(log)
+        command.assert_called_once_with(['/usr/bin/sudo', '-A', '--', '/usr/bin/bash',
+                                        str(gui.SCRIPT_DIR / 'install-memory-helper.sh')],
+                                       {'SUDO_ASKPASS': '/fixture'}, log)
+        with mock.patch.object(gui.messagebox, 'showinfo') as success:
+            done(True)
+        success.assert_called_once()
+        app.refresh_memory.assert_called_once()
+        with mock.patch.object(gui, 'run_command', side_effect=RuntimeError('Authentication failed')):
+            with self.assertRaisesRegex(RuntimeError, 'Authentication failed'):
+                work(log)
+        with mock.patch.object(gui.messagebox, 'showerror') as error:
+            done(False)
+        error.assert_called_once()
+        with mock.patch.object(gui, 'run_command'), mock.patch.object(gui, 'gui_env', return_value={}), \
+                mock.patch.object(memory, 'helper_error', return_value='Wrong installed copy'):
+            with self.assertRaisesRegex(RuntimeError, 'verification failed'):
+                work(log)
+
+    def test_setup_missing_script_never_authenticates(self):
+        app = self.app()
+        with mock.patch.object(gui.Path, 'is_file', return_value=False), \
+                mock.patch.object(gui.messagebox, 'showerror') as error:
+            app._install_memory_helper()
+        error.assert_called_once()
+        app._run_operation.assert_not_called()
+
     def test_real_layout(self):
         try:
             root = gui.tk.Tk()
