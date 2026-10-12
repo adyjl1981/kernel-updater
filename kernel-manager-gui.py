@@ -43,6 +43,7 @@ from ubuntu_theme import apply_theme, scrolled_text, scrolled_tree
 from dependency_checker import (check_dependencies, initial_check_needed,
                                 install_packages, packages_to_install)
 from hardware_optimizer import Scanner, render_report
+from kernel_manager_common import log_event
 import grub_menu
 import build_resources
 import memory_management
@@ -97,6 +98,7 @@ def gui_env() -> dict:
 def send_notification(title: str, body: str):
     """Best-effort desktop notification. Silently does nothing if
     notify-send isn't available rather than failing the calling operation."""
+    log_event("desktop_notification", title=title, body=body)
     if shutil.which("notify-send"):
         try:
             subprocess.run(["notify-send", title, body], timeout=5)
@@ -184,8 +186,10 @@ def run_command(cmd, env=None, log_fn=lambda text: None):
     cmd = [str(arg) for arg in cmd]
     if cmd[0] == "sudo":
         cmd.insert(1, "--preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE")
+    log_event("command_started", command=cmd)
     log_fn(f"$ {shlex.join(cmd)}\n")
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    log_event("command_finished", command=cmd, returncode=proc.returncode)
     log_fn(proc.stdout + proc.stderr)
     if proc.returncode:
         raise RuntimeError(f"Command failed ({proc.returncode}): {shlex.join(cmd)}")

@@ -202,6 +202,15 @@ working display; some native kernel checks need additional source/toolchain
 fixtures and otherwise skip. Passing fixture tests does not replace testing
 privileged operations in a disposable system.
 
+## Operational improvements
+
+The repository now keeps structured machine-readable operational data in
+`~/.cache/kernel-manager/` for faster debugging and safer recovery. Build state is
+stored in `build-metadata.json`, while command and notification events are stored
+in `operations.jsonl`. A CI workflow also runs the Python regression suite on
+pushes and pull requests so the repository keeps a quick safety net around
+changes.
+
 ## Further documentation
 
 - [Memory Management](docs/memory-management.md)

@@ -76,6 +76,37 @@ log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
 warn() { echo -e "\n\033[1;33m[warn]\033[0m $*"; }
 err()  { echo -e "\n\033[1;31m[error]\033[0m $*"; exit 1; }
 
+write_build_metadata() {
+  local status="${1:-unknown}"
+  python3 - "$status" "$KVER" "$LOCALVERSION" "$TOOLCHAIN" "$JOBS" "$TREE" "$BUILD_LOG" "$ARCH" "$USE_LTO" "$FULL_DEBUG_INFO" "$HARDWARE_OPTIMISED" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+status, kver, localversion, toolchain, jobs, tree, build_log, arch, use_lto, full_debug_info, hardware_optimised = sys.argv[1:]
+path = os.path.join(os.path.expanduser('~'), '.cache', 'kernel-manager', 'build-metadata.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+payload = {
+    'timestamp': datetime.now(timezone.utc).isoformat(),
+    'status': status,
+    'version': kver,
+    'localversion': localversion,
+    'toolchain': toolchain,
+    'jobs': int(jobs or 0),
+    'tree': tree,
+    'build_log': build_log,
+    'arch': arch,
+    'use_lto': use_lto.lower() == 'true',
+    'full_debug_info': full_debug_info.lower() == 'true',
+    'hardware_optimised': hardware_optimised.lower() == 'true',
+}
+with open(path, 'w', encoding='utf-8') as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write('\n')
+PY
+}
+
 # Transparent sudo wrapper: if SUDO_ASKPASS is set (the GUI app sets this so
 # it can supply a password dialog instead of a terminal prompt), use `-A` to
 # read the password from that helper. Otherwise behaves exactly like a plain
@@ -217,6 +248,8 @@ TOOLCHAIN=gcc
 $USE_CLANG && TOOLCHAIN=clang
 BUILD_ID="$KVER $TOOLCHAIN $USE_LTO $FULL_DEBUG_INFO $HARDWARE_OPTIMISED $LOCALVERSION"
 TREE="$SRC_DIR/linux-$KVER"
+BUILD_LOG=""
+write_build_metadata "started"
 if ! $FORCE; then
   for candidate in "$SRC_DIR"/linux-"$KVER"*; do
     if [[ -f "$candidate/.kernel-manager-complete" && -s "$candidate/vmlinux" && -s "$candidate/.kernel-manager-make-args" ]]; then
@@ -460,6 +493,7 @@ IMAGE=$(make -s "${MAKE_ARGS[@]}" image_name)
 sha256sum .config .kernel-manager-make-args include/config/kernel.release vmlinux System.map "$IMAGE" > .kernel-manager-checksums
 printf '%s\n' "$BUILD_ID" > .kernel-manager-complete
 log "Build complete!"
+write_build_metadata "complete"
 printf 'KERNEL_MANAGER_BUILD_DIR=%s\n' "$TREE"
 echo "Kernel ${KVER}${LOCALVERSION} is built. Install it by running:"
 printf "    cd %q\n" "$PWD"
