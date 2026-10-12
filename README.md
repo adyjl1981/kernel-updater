@@ -204,12 +204,23 @@ privileged operations in a disposable system.
 
 ## Operational improvements
 
-The repository now keeps structured machine-readable operational data in
-`~/.cache/kernel-manager/` for faster debugging and safer recovery. Build state is
-stored in `build-metadata.json`, while command and notification events are stored
-in `operations.jsonl`. A CI workflow also runs the Python regression suite on
-pushes and pull requests so the repository keeps a quick safety net around
-changes.
+The repository keeps structured machine-readable operational data in
+`~/.cache/kernel-manager/`. Build state is stored in `build-metadata.json`, while
+command and notification events are stored in `operations.jsonl`. The shared GRUB
+entry parser now lives with the GRUB transaction helpers rather than in the GUI
+controller. Long-running operation dialogs show an activity indicator and a
+clear completion or failure status.
+
+CI runs the regression suite on Ubuntu, checks Python compilation and shell
+syntax, runs Ruff's critical syntax/undefined-name rules and runs ShellCheck at
+error severity. Fedora and Arch container smoke jobs also exercise the dependency
+catalog and shell/Python checks. Dependency
+names intentionally follow each distribution's repositories rather than pinning
+package versions; repeatable kernel builds are instead tied to the verified
+kernel.org source archive and recorded build metadata. GRUB changes already use
+backups and automatic rollback on failed transactions, and memory changes use a
+durable recovery record with explicit restore safeguards; see the related
+documentation for recovery limits.
 
 ## Further documentation
 

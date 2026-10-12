@@ -44,6 +44,7 @@ from dependency_checker import (check_dependencies, initial_check_needed,
                                 install_packages, packages_to_install)
 from hardware_optimizer import Scanner, render_report
 from kernel_manager_common import log_event
+from grub_menu import parse_entries as parse_grub_entries
 import grub_menu
 import build_resources
 import memory_management
@@ -210,34 +211,6 @@ def read_grub_config(env=None, path=None):
         return path.read_text()
     except PermissionError:
         return run_command(["sudo", "-A", "cat", str(path)], env or gui_env()).stdout
-
-
-def parse_grub_entries(text, with_images=False):
-    """Read title paths from generated GRUB menu/submenu blocks."""
-    entries, stack, images = [], [], {}
-    for line in text.splitlines():
-        line = line.strip()
-        if line == "}":
-            if stack:
-                stack.pop()
-            continue
-        if re.match(r"^linux(?:efi|16)?\s", line) and stack and stack[-1][0] == "menuentry":
-            words = shlex.split(line, comments=True)
-            if len(words) > 1:
-                entry = ">".join(name for _, name in stack)
-                images.setdefault(entry, []).append(words[1])
-        if not re.match(r"^(menuentry|submenu)\s", line):
-            continue
-        words = shlex.split(line, comments=True)
-        if len(words) < 3 or words[-1] != "{":
-            raise RuntimeError("Unsupported GRUB entry format; select the boot entry manually.")
-        kind, title = words[:2]
-        if kind == "menuentry":
-            entries.append(">".join([name for typ, name in stack if typ == "submenu"] + [title]))
-        stack.append((kind, title))
-    if stack:
-        raise RuntimeError("Unbalanced GRUB menu blocks; select the boot entry manually.")
-    return [(entry, images.get(entry, [])) for entry in entries] if with_images else entries
 
 
 def grub_menu_titles(env=None):
@@ -2241,8 +2214,11 @@ class LogWindow:
         self.win.title(title)
         self.win.geometry("680x380")
         self.win.transient(parent)
-        self.status_label = ttk.Label(self.win, text="Working…", style="Status.TLabel")
+        self.status_label = ttk.Label(self.win, text="Operation in progress", style="Status.TLabel")
         self.status_label.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        self.progress = ttk.Progressbar(self.win, mode="indeterminate", takefocus=False)
+        self.progress.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        self.progress.start(12)
         panel, self.text = scrolled_text(self.win, wrap="none")
         panel.pack(fill="both", expand=True, padx=12, pady=(12, 6))
         self.queue = queue.Queue(maxsize=2000)
@@ -2252,7 +2228,9 @@ class LogWindow:
 
     def finish(self, success):
         if not self.closed:
-            self.status_label.configure(text="Completed" if success else "Failed — see details above")
+            self.progress.stop()
+            self.status_label.configure(
+                text="Operation completed" if success else "Operation failed — see details above")
 
     def _close(self):
         self.closed = True

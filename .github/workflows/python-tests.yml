@@ -1,4 +1,4 @@
-name: Python tests
+name: Tests and compatibility
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  unittest:
+  regression:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -15,7 +15,49 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.x'
+
+      - name: Install GUI test runtime and shell linter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk shellcheck
+          python3 -m pip install ruff
+
+      - name: Compile Python modules
+        run: /usr/bin/python3 -m compileall -q .
+
+      - name: Lint Python application modules
+        run: ruff check --select E4,E7,E9,F821 kernel_manager_common.py grub_menu.py kernel-manager-gui.py
+
+      - name: Check shell syntax and lint errors
+        run: |
+          bash -n build-custom-kernel.sh install-custom-kernel.sh install-memory-helper.sh install-desktop-entry.sh
+          shellcheck --severity=error build-custom-kernel.sh install-custom-kernel.sh install-memory-helper.sh install-desktop-entry.sh
 
       - name: Run regression tests
-        run: python3 -m unittest discover -s tests -v
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+
+  distro-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: fedora:latest
+            install: dnf -y install python3 python3-tkinter ShellCheck
+          - image: archlinux:base-devel
+            install: pacman -Sy --noconfirm python tk shellcheck
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check Python, shell and dependency catalog on ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          INSTALL: ${{ matrix.install }}
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$IMAGE" \
+            bash -lc "$INSTALL && python3 -m compileall -q . && bash -n build-custom-kernel.sh install-custom-kernel.sh install-memory-helper.sh install-desktop-entry.sh && shellcheck --severity=error build-custom-kernel.sh install-custom-kernel.sh install-memory-helper.sh install-desktop-entry.sh && python3 -B -m unittest discover -s tests -p 'test_dependencies.py' -v"

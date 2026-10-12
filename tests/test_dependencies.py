@@ -94,6 +94,19 @@ class DependencyDialogTests(unittest.TestCase):
         self.assertEqual(deps.detect_package_manager(lambda name: "/usr/bin/apt" if name == "apt" else None), "apt")
         self.assertIsNone(deps.detect_package_manager(lambda name: None))
 
+    def test_supported_package_mappings_are_complete_and_deduplicated(self):
+        managers = {"apt", "dnf", "pacman"}
+        for dependency in deps.DEPENDENCIES:
+            with self.subTest(dependency=dependency.key):
+                mappings = dict(dependency.packages)
+                self.assertLessEqual(set(mappings), managers)
+                self.assertEqual(len(mappings), len(dependency.packages))
+                for packages in mappings.values():
+                    self.assertTrue(packages)
+                    self.assertEqual(len(packages), len(set(packages)))
+                if dependency.required:
+                    self.assertEqual(set(mappings), managers)
+
     def test_mixed_and_unsupported_mappings(self):
         manual = deps.Dependency("manual", "Manual tool", "Test", "tests", True, tools=("manual",))
         results = [deps.DependencyResult(self.optional, missing_tools=("extra",)),

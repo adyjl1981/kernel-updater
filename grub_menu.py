@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -23,6 +24,34 @@ KEYS = {"GRUB_TIMEOUT_STYLE", "GRUB_TIMEOUT"} | LEGACY
 KEY_PATTERN = "(?:" + "|".join(sorted(KEYS)) + ")"
 ASSIGNMENT = re.compile(r"^(?P<prefix>[ \t]*(?:export[ \t]+)?)(?P<key>" + KEY_PATTERN +
                         r")=(?P<value>'[^']*'|\"[^\"$`\\]*\"|[a-zA-Z0-9_-]*)(?P<tail>[ \t]+#.*|[ \t]*)(?P<end>\r?\n)?$")
+
+
+def parse_entries(text, with_images=False):
+    """Parse generated GRUB menu/submenu blocks without evaluating shell code."""
+    entries, stack, images = [], [], {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line == "}":
+            if stack:
+                stack.pop()
+            continue
+        if re.match(r"^linux(?:efi|16)?\s", line) and stack and stack[-1][0] == "menuentry":
+            words = shlex.split(line, comments=True)
+            if len(words) > 1:
+                entry = ">".join(name for _, name in stack)
+                images.setdefault(entry, []).append(words[1])
+        if not re.match(r"^(menuentry|submenu)\s", line):
+            continue
+        words = shlex.split(line, comments=True)
+        if len(words) < 3 or words[-1] != "{":
+            raise RuntimeError("Unsupported GRUB entry format; select the boot entry manually.")
+        kind, title = words[:2]
+        if kind == "menuentry":
+            entries.append(">".join([name for typ, name in stack if typ == "submenu"] + [title]))
+        stack.append((kind, title))
+    if stack:
+        raise RuntimeError("Unbalanced GRUB menu blocks; select the boot entry manually.")
+    return [(entry, images.get(entry, [])) for entry in entries] if with_images else entries
 
 
 def assignments(text, pattern=KEY_PATTERN):

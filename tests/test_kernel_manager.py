@@ -1117,6 +1117,18 @@ class AdditionalRegressionTests(unittest.TestCase):
         window.append("operation can continue")
         self.assertEqual(window.queue.qsize(), 1)
 
+    def test_operation_log_stops_progress_and_reports_result(self):
+        for success, expected in ((True, "Operation completed"),
+                                  (False, "Operation failed — see details above")):
+            with self.subTest(success=success):
+                window = gui.LogWindow.__new__(gui.LogWindow)
+                window.closed = False
+                window.progress = mock.Mock()
+                window.status_label = mock.Mock()
+                window.finish(success)
+                window.progress.stop.assert_called_once_with()
+                window.status_label.configure.assert_called_once_with(text=expected)
+
     def test_gui_constructs_all_tabs_and_callbacks_without_system_operations(self):
         class Widget:
             def __init__(self, *args, **kwargs):

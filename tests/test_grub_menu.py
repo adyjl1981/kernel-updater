@@ -71,6 +71,24 @@ class ParsingTests(unittest.TestCase):
                 menu.check_overrides(directory)
 
 
+class GeneratedEntryParsingTests(unittest.TestCase):
+    def test_nested_entries_and_kernel_images(self):
+        config = """submenu 'Advanced options' {
+ menuentry 'Linux 6.12.4' {
+  linux /boot/vmlinuz-6.12.4 root=/dev/test ro
+ }
+}
+"""
+        self.assertEqual(
+            menu.parse_entries(config, with_images=True),
+            [("Advanced options>Linux 6.12.4", ["/boot/vmlinuz-6.12.4"])])
+
+    def test_unbalanced_or_unsupported_entries_fail_closed(self):
+        for config in ("menuentry 'Linux' {\n", "menuentry 'Linux' --id linux { }\n"):
+            with self.subTest(config=config), self.assertRaises(RuntimeError):
+                menu.parse_entries(config)
+
+
 class TransactionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
