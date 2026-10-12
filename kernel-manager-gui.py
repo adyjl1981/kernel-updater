@@ -36,7 +36,7 @@ import time
 import queue
 import urllib.request
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from pathlib import Path
 
 from ubuntu_theme import apply_theme, scrolled_text, scrolled_tree
@@ -45,6 +45,8 @@ from dependency_checker import (check_dependencies, initial_check_needed,
 from hardware_optimizer import Scanner, render_report
 import grub_menu
 import build_resources
+import memory_management
+import wheel_scroll
 from desktop_launcher import APP_CLASS, launcher_is_current, install_launcher
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -747,6 +749,7 @@ class KernelManagerApp:
         self.root = root
         root.title("Kernel Manager")
         apply_theme(root)
+        wheel_scroll.install(root)
         root.geometry("960x700")
         root.minsize(820, 600)
 
@@ -778,6 +781,7 @@ class KernelManagerApp:
         self.maintenance_tab = ttk.Frame(nb, padding=12)
         self.sysinfo_tab = ttk.Frame(nb, padding=12)
         self.tools_tab = ttk.Frame(nb, padding=12)
+        self.memory_tab = ttk.Frame(nb, padding=12)
         self.mok_tab = ttk.Frame(nb, padding=12)
         nb.add(self.installed_tab, text="Installed Kernels")
         nb.add(self.build_tab, text="Build New Kernel")
@@ -785,6 +789,8 @@ class KernelManagerApp:
         nb.add(self.maintenance_tab, text="Maintenance")
         nb.add(self.sysinfo_tab, text="System Info")
         nb.add(self.tools_tab, text="Tools")
+        if sys.platform.startswith("linux"):
+            nb.add(self.memory_tab, text="Memory Management")
         nb.add(self.mok_tab, text="Secure Boot (MOK)")
 
         self._build_installed_tab()
@@ -793,6 +799,8 @@ class KernelManagerApp:
         self._build_maintenance_tab()
         self._build_sysinfo_tab()
         self._build_tools_tab()
+        if sys.platform.startswith("linux"):
+            self._build_memory_tab()
         self._build_mok_tab()
 
         self.refresh_installed()
@@ -804,6 +812,241 @@ class KernelManagerApp:
             self.root.after(350, self._run_initial_dependency_check)
         self.root.after(700, self._offer_desktop_launcher)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_memory_tab(self):
+        canvas = tk.Canvas(self.memory_tab, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.memory_tab, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        frame = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self.memory_snapshot = None
+        self.memory_seen_paths = set()
+        self.memory_current = None
+        self.memory_helper_problem = memory_management.helper_error()
+        self.memory_summary = ttk.Label(frame, text="Loading memory snapshot…", wraplength=730)
+        self.memory_summary.pack(fill="x", pady=4)
+        ttk.Button(frame, text="Refresh Memory", style="Accent.TButton",
+                   command=self.refresh_memory).pack(anchor="w", pady=4)
+        ttk.Button(frame, text="Check Swap Settings", command=self.on_check_swap_settings).pack(anchor="w", pady=4)
+        device_frame, self.memory_devices = scrolled_tree(frame, columns=("kind", "active", "configured", "size", "used", "priority"),
+                                            show="tree headings", height=6)
+        self.memory_devices.heading("#0", text="Device / source")
+        self.memory_devices.column("#0", width=180)
+        for key, title in (("kind", "Type"), ("active", "Active"), ("configured", "Configuration observed"),
+                           ("size", "Size"), ("used", "Used"), ("priority", "Priority")):
+            self.memory_devices.heading(key, text=title)
+            self.memory_devices.column(key, width=130)
+        device_frame.pack(fill="both", expand=True)
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=4)
+        self.memory_enable = ttk.Button(actions, text="Enable Selected", state="disabled",
+                                        command=lambda: self.on_memory_toggle(True))
+        self.memory_disable = ttk.Button(actions, text="Disable Selected", state="disabled",
+                                         command=lambda: self.on_memory_toggle(False))
+        for button in (self.memory_enable, self.memory_disable):
+            button.pack(side="left", padx=3)
+        ttk.Button(actions, text="Helper Setup", command=self.on_memory_setup).pack(side="left", padx=3)
+        ttk.Button(frame, text="Add Device to List…", command=self.on_memory_add_device).pack(anchor="w", pady=4)
+        self.memory_devices.bind("<<TreeviewSelect>>", lambda event: self._memory_selection_changed())
+        settings = ttk.Frame(frame)
+        settings.pack(fill="x", pady=4)
+        ttk.Label(settings, text="New vm.swappiness (0–200):").pack(side="left")
+        self.memory_swappiness = tk.StringVar(value="")
+        ttk.Entry(settings, textvariable=self.memory_swappiness, width=6, state="normal").pack(side="left", padx=4)
+        self.memory_scope = tk.StringVar(value="Temporary (until reboot)")
+        ttk.Combobox(settings, textvariable=self.memory_scope, state="readonly", width=25,
+                     values=("Temporary (until reboot)", "Persistent (future boots)")).pack(side="left")
+        self.memory_apply = ttk.Button(settings, text="Apply Swappiness", state="disabled",
+                                      style="Accent.TButton", command=self.on_memory_swappiness)
+        self.memory_apply.pack(side="left", padx=4)
+        self.memory_restore = ttk.Button(frame, text="Restore Previous Swappiness", state="disabled",
+                                        command=self.on_memory_restore)
+        self.memory_restore.pack(anchor="w", pady=4)
+        self.memory_action_status = ttk.Label(frame, text="", wraplength=730)
+        self.memory_action_status.pack(fill="x", pady=4)
+        ttk.Label(frame, text=memory_management.LIMITATION,
+                  wraplength=730).pack(fill="x", pady=4)
+        self.memory_details = ttk.Label(frame, text="", wraplength=730)
+        self.memory_details.pack(fill="x", pady=4)
+        self.refresh_memory()
+
+    def _memory_report(self, title, report):
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("800x600")
+        panel, text = scrolled_text(win, wrap="word")
+        panel.pack(fill="both", expand=True, padx=12, pady=12)
+        text.insert("1.0", report)
+        text.configure(state="disabled")
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=8)
+        win.bind("<Escape>", lambda event: win.destroy())
+
+    def on_check_swap_settings(self):
+        paths = tuple(self.memory_seen_paths)
+        def work():
+            return memory_management.check_settings(memory_management.snapshot(extra_paths=paths))
+
+        def done(report):
+            self._memory_report("Check Swap Settings — read only", report)
+
+        self._read_async("swap-assessment", work, done)
+
+
+    def refresh_memory(self):
+        def read():
+            try:
+                return memory_management.snapshot(extra_paths=tuple(self.memory_seen_paths))
+            except Exception as error:
+                return str(error)
+
+        def done(result):
+            self.memory_snapshot = None
+            self.memory_current = None
+            self.memory_helper_problem = memory_management.helper_error()
+            self.memory_devices.delete(*self.memory_devices.get_children())
+            self.memory_apply.configure(state="disabled")
+            self.memory_restore.configure(state="disabled")
+            self._memory_selection_changed()
+            self.memory_swappiness.set("")
+            if isinstance(result, str):
+                self.memory_summary.configure(text="Memory snapshot unavailable")
+                self.memory_details.configure(text=result)
+                return
+            m = result.memory
+            size = memory_management.exact_size
+            self.memory_summary.configure(text=(
+                f"RAM total: {size(m.get('MemTotal'))} · available: {size(m.get('MemAvailable'))}\n"
+                f"Swap total: {size(m.get('SwapTotal'))} · free: {size(m.get('SwapFree'))}\n"
+                f"Current vm.swappiness: {result.swappiness if result.swappiness is not None else 'unknown'}\n"
+                "Snapshot at refresh time. Linux kB counters mean 1024 bytes; MiB = 1,048,576 bytes."))
+            self.memory_swappiness.set(str(result.swappiness) if result.swappiness is not None else "unknown")
+            self.memory_snapshot = result
+            self.memory_seen_paths.update(item.path for item in result.devices if item.path.startswith("/") and item.identity is not None)
+            self.memory_current = result.swappiness
+            ready = self.memory_helper_problem is None and result.swappiness is not None
+            self.memory_apply.configure(state="normal" if ready else "disabled")
+            self.memory_restore.configure(state="normal" if ready else "disabled")
+            self.memory_action_status.configure(text=self.memory_helper_problem or "Select a device to enable or disable it. Swappiness changes can be restored within this boot.")
+            for index, item in enumerate(result.devices):
+                self.memory_devices.insert("", "end", iid=str(index), text=item.path, values=(
+                    item.kind, "unknown" if item.active is None else "yes" if item.active else "no", "; ".join(item.configured) or "unknown",
+                    size(item.size), size(item.used), item.priority if item.priority is not None else "unknown"))
+            self.memory_details.configure(text=result.resume + "\n" + "\n".join(result.warnings))
+        self._read_async("Memory snapshot", read, done)
+
+    def on_memory_add_device(self):
+        path = simpledialog.askstring("Discover Swap Device",
+            "Enter the absolute path of a configured or previously disabled swap device.\n"
+            "This only adds it to monitoring; the helper independently checks eligibility before enabling it.", parent=self.root)
+        if path is None:
+            return
+        if not path.startswith("/") or str(Path(path)) != path or '..' in Path(path).parts or any(ord(c) < 32 for c in path):
+            messagebox.showerror("Invalid device path", "Enter a canonical absolute path without control characters or '..'.")
+            return
+        self.memory_seen_paths.add(path)
+        self.refresh_memory()
+
+    def on_memory_setup(self):
+        installer = SCRIPT_DIR / "install-memory-helper.sh"
+        command = shlex.join(["sudo", "bash", str(installer)])
+        messagebox.showinfo("Memory Helper Setup",
+            "Review memory_helper.py and install-memory-helper.sh, then run this once in a terminal:\n\n"
+            + command + "\n\nThis installs only the root-owned helper. It does not change swap or swappiness. "
+            "Refresh Memory afterwards. No passwordless permissions are added.", parent=self.root)
+
+    def _selected_memory_device(self):
+        selected = self.memory_devices.selection()
+        if not self.memory_snapshot or len(selected) != 1:
+            return None
+        try:
+            return self.memory_snapshot.devices[int(selected[0])]
+        except (ValueError, IndexError):
+            return None
+
+    def _memory_selection_changed(self):
+        item = self._selected_memory_device()
+        for enable, button in ((True, self.memory_enable), (False, self.memory_disable)):
+            problem = self.memory_helper_problem or memory_management.toggle_error(item, enable)
+            button.configure(state="disabled" if problem else "normal")
+        if item:
+            self.memory_action_status.configure(text=self.memory_helper_problem or
+                "Runtime operation only. The helper rechecks ownership, configuration, memory headroom and hibernation. "
+                "Unsupported or unsafe requests are refused without formatting any device.")
+
+    def _memory_change_ready(self):
+        problem = memory_management.helper_error()
+        if problem:
+            messagebox.showerror("Memory changes unavailable", problem + " Use Helper Setup for instructions.")
+            return False
+        if self.memory_snapshot is None or self.memory_current is None:
+            messagebox.showerror("Memory snapshot required", "Refresh Memory before confirming a change.")
+            return False
+        return True
+
+    def _run_memory_change(self, title, request):
+        def work(log):
+            memory_management.request_change(request, gui_env(), log)
+        def done(success):
+            self.refresh_memory()
+            if success:
+                messagebox.showinfo(title, "The confirmed operation completed. See the operation log and refreshed values.")
+            else:
+                messagebox.showerror(title, "The memory operation failed. See the operation log for the reason and recovery instructions. Refresh before retrying.")
+        self._run_operation(title, work, done)
+
+    def on_memory_swappiness(self):
+        try:
+            value = memory_management.validate_swappiness(self.memory_swappiness.get())
+            scope = self.memory_scope.get()
+            if scope not in ("Temporary (until reboot)", "Persistent (future boots)"):
+                raise ValueError("Choose Temporary or Persistent explicitly.")
+        except ValueError as error:
+            messagebox.showerror("Invalid swappiness", str(error))
+            return
+        if not self._memory_change_ready():
+            return
+        persistent = scope == "Persistent (future boots)"
+        detail = ("This also writes the dedicated sysctl configuration for future boots. Conflicting settings will be refused."
+                  if persistent else "Only the running value changes; boot configuration remains unchanged.")
+        if not messagebox.askyesno("Confirm Swappiness Change",
+                f"Change current vm.swappiness from {self.memory_current} to {value}?\n\n{scope}. {detail}\n"
+                "The previous setting is recorded for restore. Administrator authentication follows."):
+            return
+        self._run_memory_change("Change Swappiness", {"protocol": 1, "action": "swappiness", "value": value,
+                                "persistent": persistent, "expected": self.memory_current})
+
+    def on_memory_restore(self):
+        if not self._memory_change_ready():
+            return
+        if not messagebox.askyesno("Confirm Swappiness Restore",
+                "Restore the last recorded previous swappiness setting and any configuration changed with it?\n\n"
+                "This uses a backup from this boot, not a factory default. External changes will cause a refusal. "
+                "Administrator authentication follows."):
+            return
+        self._run_memory_change("Restore Swappiness", {"protocol": 1, "action": "restore_swappiness",
+                                                       "expected": self.memory_current})
+
+    def on_memory_toggle(self, enable):
+        item = self._selected_memory_device()
+        problem = memory_management.toggle_error(item, enable)
+        if problem:
+            messagebox.showerror("Swap operation unavailable", problem)
+            return
+        if not self._memory_change_ready():
+            return
+        verb = "Enable" if enable else "Disable"
+        warning = ("Only configured swap, initialized zram, or a device previously disabled by this helper can be enabled."
+                   if enable else "Disabling can cause memory pressure. Insufficient RAM or hibernation configuration will cause a refusal.")
+        if not messagebox.askyesno(f"Confirm {verb} Swap",
+                f"{verb} only {item.path} ({item.kind})?\n\n{warning}\n"
+                "This affects the current session; boot configuration is unchanged. Administrator authentication follows."):
+            return
+        self._run_memory_change(f"{verb} Swap", {"protocol": 1, "action": "swap", "path": item.path,
+                               "enable": enable, "expected_active": item.active, "identity": item.identity})
 
     def _offer_desktop_launcher(self):
         if self.closed or launcher_is_current(SCRIPT_DIR):

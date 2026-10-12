@@ -18,6 +18,8 @@ Copyright (C) 2026 Adrian
 - Install completed builds and select a GRUB default or one-time boot entry.
 - Configure GRUB menu visibility and timeout on supported systems.
 - Generate and enrol Secure Boot keys, and sign kernels and modules.
+- Monitor RAM/swap and change swappiness or individual swap runtime state with
+  confirmed administrator actions and conservative safety checks.
 - Check dependencies and install a desktop launcher.
 
 ## Requirements
@@ -61,6 +63,21 @@ bash install-desktop-entry.sh
 ```
 
 The launcher references the repository's location. Update it if you move the files.
+
+## Memory controls
+
+The Linux **Memory Management** tab shows RAM, swap devices and current swappiness.
+To enable authenticated temporary/persistent swappiness and individual swap on/off
+controls, review the helper and run the one-time setup:
+
+```sh
+sudo bash install-memory-helper.sh
+```
+
+Refresh Memory afterwards. Setup installs a separate root-owned helper; it does
+not change memory settings or add passwordless permissions. Unsafe requests are
+refused. See [Memory Management](docs/memory-management.md)
+for supported devices, recovery and limitations.
 
 ## Building and installing a kernel
 
