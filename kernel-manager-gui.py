@@ -1593,11 +1593,14 @@ class KernelManagerApp:
 
         mode = ttk.LabelFrame(frame, text="Build configuration")
         mode.pack(fill="x", padx=4, pady=4)
-        self.build_mode_var = tk.StringVar(value=("hardware" if self.presets.get("build_mode") == "hardware" else "standard"))
+        self.build_mode_var = tk.StringVar(value=(self.presets.get("build_mode") if self.presets.get("build_mode") in ("hardware", "lowlatency") else "standard"))
         ttk.Radiobutton(mode, text="Standard", variable=self.build_mode_var, value="standard").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Radiobutton(mode, text="Hardware Optimised", variable=self.build_mode_var, value="hardware").grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Radiobutton(mode, text="Low Latency", variable=self.build_mode_var, value="lowlatency").grid(row=0, column=2, sticky="w", padx=6, pady=4)
         ttk.Label(mode, text="Targets this hardware while retaining common platform and installed-software support.").grid(row=1, column=0, columnspan=3, sticky="w", padx=6)
-        ttk.Button(mode, text="Scan Hardware…", command=self.scan_hardware).grid(row=0, column=2, padx=10)
+        ttk.Button(mode, text="Scan Hardware…", command=self.scan_hardware).grid(row=0, column=3, padx=10)
+
+        ttk.Label(mode, text="Standard: broad baseline. Hardware Optimised: trims unused drivers.\nLow Latency: full preemption, 1000 Hz, high-resolution timers and tickless idle.\nMay improve responsiveness under load at a throughput and power cost; not real-time.\nDynamic preemption boot overrides can change the runtime behaviour.", wraplength=680).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=4)
 
         opts = ttk.LabelFrame(frame, text="Toolchain options")
         opts.pack(fill="x", padx=4, pady=4)
@@ -1817,6 +1820,8 @@ class KernelManagerApp:
             cmd.append("--force")
         if self.build_mode_var.get() == "hardware":
             cmd.append("--hardware-optimised")
+        elif self.build_mode_var.get() == "lowlatency":
+            cmd.append("--low-latency")
         self._start_stream(cmd, SCRIPT_DIR, "build")
 
     def _start_stream(self, cmd, cwd, kind):

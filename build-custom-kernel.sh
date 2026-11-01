@@ -34,6 +34,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 USE_CLANG=false
 USE_LTO=false
 HARDWARE_OPTIMISED=false
+LOW_LATENCY=false
 FORCE=false
 FULL_DEBUG_INFO=false
 JOBS=""
@@ -46,11 +47,12 @@ while [[ $# -gt 0 ]]; do
     --lto) USE_LTO=true; shift ;;
     --force) FORCE=true; shift ;;
     --full-debug-info) FULL_DEBUG_INFO=true; shift ;;
+    --low-latency) LOW_LATENCY=true; shift ;;
     --hardware-optimised) HARDWARE_OPTIMISED=true; shift ;;
     --jobs) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || { echo "--jobs requires a positive integer" >&2; exit 1; }; JOBS="$2"; shift 2 ;;
     --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; LOCALVERSION_EXPLICIT=true; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--clang] [--lto] [--hardware-optimised] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
+      echo "Usage: $0 [--clang] [--lto] [--hardware-optimised | --low-latency] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
       echo "  --jobs N           override automatic CPU/RAM-based parallel job selection."
       echo "  --lto              requires --clang. Not recommended on low-RAM/low-core machines."
       echo "  --force            rebuild even if this is the same version you last built."
@@ -64,12 +66,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if $LOW_LATENCY && $HARDWARE_OPTIMISED; then
+  echo "Choose one build profile: Hardware Optimised or Low Latency" >&2; exit 1
+fi
+
 if ! $LOCALVERSION_EXPLICIT; then
   if $HARDWARE_OPTIMISED; then
     LOCALVERSION="-optimized"
   else
     LOCALVERSION="-custom"
   fi
+fi
+
+if $LOW_LATENCY && [[ "$LOCALVERSION" != *-lowlatency ]]; then
+  LOCALVERSION+="-lowlatency"
 fi
 
 log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -351,6 +361,7 @@ log "Generating base config from your currently running kernel"
 if [[ -f "/boot/config-$(uname -r)" ]]; then
   cp "/boot/config-$(uname -r)" .config
 else
+  $LOW_LATENCY && err "Low Latency requires the running kernel configuration to preserve compatibility."
   $HARDWARE_OPTIMISED && err "The running kernel configuration is unavailable; Hardware Optimised mode cannot safely continue. Use Standard mode."
   warn "No existing /boot/config-$(uname -r) found; using defconfig instead."
   make "${MAKE_ARGS[@]}" defconfig
@@ -433,6 +444,11 @@ fi
 # Validate the same inventory after every configuration edit, including LTO.
 if $HARDWARE_OPTIMISED; then
   python3 "$SCRIPT_DIR/hardware_optimizer.py" verify .config --baseline "$BASELINE_CONFIG" --source "$PWD" --report "$HARDWARE_REPORT" || err "Final boot/hardware/platform/software validation failed. Use Standard mode."
+fi
+
+# Apply last so all toolchain/debug edits have already been resolved by Kconfig.
+if $LOW_LATENCY; then
+  python3 "$SCRIPT_DIR/low_latency.py" "$PWD" "${MAKE_ARGS[@]}" || err "Low Latency configuration failed; no kernel was built."
 fi
 
 # Downloads/configuration can take time: recheck headroom immediately before make.

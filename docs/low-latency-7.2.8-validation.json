@@ -1,0 +1,41 @@
+{
+  "requested": {
+    "PREEMPT": "y",
+    "HZ_1000": "y",
+    "HZ": "1000",
+    "HIGH_RES_TIMERS": "y",
+    "NO_HZ_IDLE": "y",
+    "PREEMPT_NONE": "n",
+    "PREEMPT_VOLUNTARY": "n",
+    "PREEMPT_LAZY": "n",
+    "PREEMPT_RT": "n",
+    "HZ_100": "n",
+    "HZ_250": "n",
+    "HZ_300": "n",
+    "NO_HZ_FULL": "n",
+    "HZ_PERIODIC": "n",
+    "PREEMPT_DYNAMIC": "y",
+    "RCU_EXPERT": "y"
+  },
+  "effective": {
+    "PREEMPT": "y",
+    "HZ_1000": "y",
+    "HZ": "1000",
+    "HIGH_RES_TIMERS": "y",
+    "NO_HZ_IDLE": "y",
+    "PREEMPT_NONE": "n",
+    "PREEMPT_VOLUNTARY": "n",
+    "PREEMPT_LAZY": "n",
+    "PREEMPT_RT": "n",
+    "HZ_100": "n",
+    "HZ_250": "n",
+    "HZ_300": "n",
+    "NO_HZ_FULL": "n",
+    "HZ_PERIODIC": "n",
+    "PREEMPT_DYNAMIC": "y",
+    "RCU_EXPERT": "y"
+  },
+  "lost_baseline_features": [],
+  "errors": [],
+  "dynamic_fallback": false
+}

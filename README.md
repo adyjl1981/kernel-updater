@@ -222,3 +222,51 @@ under those terms. Distributed modified versions must remain under GPLv3 and
 provide corresponding source code as required by the licence.
 
 See [LICENSE](LICENSE) for the complete terms.
+
+### Low Latency builds
+
+Select **Low Latency** in the Build tab, or pass `--low-latency` to
+`build-custom-kernel.sh`. This is a separate profile; it cannot be combined with
+`--hardware-optimised`. Standard and Hardware Optimised keep their existing defaults.
+Low Latency uses the running kernel configuration without localmodconfig pruning;
+it refuses to proceed if that configuration is unavailable.
+
+The overlay requests `PREEMPT=y`, `PREEMPT_DYNAMIC=y` where supported,
+`HZ_1000=y`, `HZ=1000`, `HIGH_RES_TIMERS=y` and `NO_HZ_IDLE=y`.
+Native `olddefconfig` resolves target-version and architecture dependencies.
+If dynamic preemption is unavailable, static full preemption is accepted; if
+full preemption, 1000 Hz, high-resolution timers or tickless idle cannot be
+retained, the build stops. The final report is saved inside the source tree as
+`.kernel-manager-low-latency.json`, including effective values and any enabled
+baseline features lost during resolution. Any such loss outside the explicit
+latency overlay stops the build, preserving the existing compatibility baseline.
+This does not establish compatibility that was absent from the baseline.
+
+Full preemption favours responsiveness under load, potentially reducing throughput.
+1000 Hz increases timer overhead and may increase power use; tickless idle avoids
+periodic ticks on idle CPUs. Full tickless CPU isolation is disabled. Other
+scheduler policy, CPU isolation, driver and hardware settings are inherited.
+`PREEMPT_LAZY` is deliberately disabled in favour of eager full preemption;
+`PREEMPT_RT` is also disabled. This is a desktop low-latency profile, with no
+real-time deadline guarantee. Runtime `preempt=` boot arguments can override the
+default when dynamic preemption is enabled; this feature never edits boot arguments.
+
+Availability is detected from the target source, not guessed from its version:
+mainline 6.12 includes architecture-dependent PREEMPT_RT support, while newer
+sources also offer PREEMPT_LAZY. Native Kconfig remains authoritative across
+versions and architectures. See upstream
+[preemption Kconfig](https://github.com/torvalds/linux/blob/master/kernel/Kconfig.preempt).
+
+Release names always end in `-lowlatency`: by default `-custom-lowlatency`,
+or e.g. `--localversion -lab` produces `-lab-lowlatency`. This distinguishes
+build logs, completion identities, installed module paths and kernel releases.
+The builder currently produces kernel artifacts rather than distribution packages.
+
+Validation on Linux 7.2.8 x86_64 used native `olddefconfig` with both
+`x86_64_defconfig` and a copy of the installed 7.2.8 configuration. All required
+latency settings survived. The installed baseline required `RCU_EXPERT=y` to
+retain RCU callback offload after disabling `NO_HZ_FULL`; the overlay supplies
+that dependency only when baseline callback offload is enabled. No enabled
+baseline features were lost. Other kernel versions and architectures have not
+been validated with native Kconfig in this change. No kernel build or boot test
+was performed.

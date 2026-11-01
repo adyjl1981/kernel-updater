@@ -435,6 +435,13 @@ class GuiStateTests(unittest.TestCase):
         self.app.start_build()
         optimised = self.app._start_stream.call_args.args[0]
         self.assertIn("--hardware-optimised", optimised)
+        self.assertNotIn("--low-latency", optimised)
+        self.app.build_mode_var.get.return_value = "lowlatency"
+        self.app.start_build()
+        low_latency = self.app._start_stream.call_args.args[0]
+        self.assertIn("--low-latency", low_latency)
+        self.assertNotIn("--hardware-optimised", low_latency)
+        self.assertNotIn("--low-latency", standard)
 
     def test_update_check_skips_closed_window_and_pending_request(self):
         self.app._read_async = mock.Mock()
