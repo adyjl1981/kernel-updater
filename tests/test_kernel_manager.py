@@ -369,7 +369,7 @@ class GuiStateTests(unittest.TestCase):
         app.refresh_installed = mock.Mock()
         app.refresh_maintenance_tab = mock.Mock()
         app.refresh_logs_tab = mock.Mock()
-        for name, value in (("auto_jobs_var", False), ("jobs_var", "2"), ("toolchain_var", "gcc"), ("lto_var", False), ("debug_var", False), ("force_var", False), ("build_mode_var", "standard")):
+        for name, value in (("auto_jobs_var", False), ("jobs_var", "2"), ("toolchain_var", "gcc"), ("lto_var", False), ("debug_var", False), ("force_var", False), ("kernel_version_var", "Latest stable"), ("build_mode_var", "standard")):
             var = mock.Mock()
             var.get.return_value = value
             setattr(app, name, var)
@@ -426,6 +426,20 @@ class GuiStateTests(unittest.TestCase):
             self.app.start_build()
             popen.assert_not_called()
 
+    def test_exact_version_selection_and_invalid_input(self):
+        self.app._start_stream = mock.Mock()
+        for version in ("7.3", "7.3.1"):
+            self.app.kernel_version_var.get.return_value = version
+            self.app.start_build()
+            command = self.app._start_stream.call_args.args[0]
+            self.assertEqual(command[command.index("--kernel-version") + 1], version)
+        self.app._start_stream.reset_mock()
+        self.app.kernel_version_var.get.return_value = "7.3-rc1"
+        with mock.patch.object(gui.messagebox, "showerror") as error:
+            self.app.start_build()
+            error.assert_called_once()
+        self.app._start_stream.assert_not_called()
+
     def test_build_modes_select_only_the_optimised_flag(self):
         self.app._start_stream = mock.Mock()
         self.app.start_build()
@@ -479,7 +493,8 @@ name = pathlib.Path(sys.argv[0]).name
 with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps([name, args]) + "\n")
 localversion = next((arg.split("=", 1)[1] for arg in args if arg.startswith("LOCALVERSION=")), "-custom")
-version = "9.9.9" + localversion
+version = os.environ.get("KERNEL_TEST_VERSION", "9.9.9") + localversion
+signer = os.environ.get("KERNEL_TEST_SIGNER", "647F28654894E3BD457199BE38DBBDC86092693E")
 if name == "sudo":
     while args and args[0].startswith("-"):
         args.pop(0)
@@ -511,7 +526,7 @@ elif name == "gpg":
         if not marker.exists(): sys.exit(2)
         fingerprint = ("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                        if os.environ.get("KERNEL_TEST_WRONG_FINGERPRINT")
-                       else "647F28654894E3BD457199BE38DBBDC86092693E")
+                       else signer)
         print("pub:-:4096:1:38DBBDC86092693E:0:0:::::::")
         print("fpr:::::::::" + fingerprint + ":")
     elif "--export" in args:
@@ -529,7 +544,7 @@ elif name == "gpg":
         if not marker.exists():
             print("[GNUPG:] NO_PUBKEY 38DBBDC86092693E")
             sys.exit(2)
-        print("[GNUPG:] VALIDSIG 647F28654894E3BD457199BE38DBBDC86092693E 0 0 0 0 0 0 0 0")
+        print("[GNUPG:] VALIDSIG " + signer + " 0 0 0 0 0 0 0 0")
 elif name == "perl":
     if args == ["scripts/kconfig/streamline_config.pl", "--localmodconfig", ".", "Kconfig"]:
         if os.environ.get("KERNEL_TEST_PRUNE_FAIL"): sys.exit(2)
@@ -628,6 +643,25 @@ class ShellIntegrationTests(unittest.TestCase):
         proc = self.run_script("build-custom-kernel.sh", "--jobs", "2", *args, **environment)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return proc
+
+    def test_exact_base_release_skips_latest_and_verifies_linus(self):
+        self.build("--kernel-version", "7.3", KERNEL_TEST_VERSION="7.3",
+                   KERNEL_TEST_SIGNER="ABAF11C65A2970B130ABE3C479BE3E4300411886")
+        commands = self.commands()
+        self.assertFalse(any("https://www.kernel.org/releases.json" in args for name, args in commands))
+        self.assertTrue(any("https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.3.tar.xz" in args for name, args in commands))
+        self.assertTrue(any("torvalds@kernel.org" in args for name, args in commands))
+        self.assertTrue((self.root / "kernel-build/linux-7.3/.kernel-manager-complete").is_file())
+
+    def test_explicit_point_release_skips_latest_lookup(self):
+        self.build("--kernel-version", "9.9.9")
+        self.assertFalse(any("https://www.kernel.org/releases.json" in args for name, args in self.commands()))
+
+    def test_invalid_exact_versions_fail_before_commands(self):
+        for version in ("", "v7.3", "7.3-rc1", "7.3.0", "../7.3", "7.03", "7.3;id"):
+            result = self.run_script("build-custom-kernel.sh", "--kernel-version", version)
+            self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.commands(), [])
 
     def test_bad_arguments_fail_before_any_commands(self):
         for args in (("--jobs",), ("--jobs", "0"), ("--localversion", "../bad"), ("--lto",)):

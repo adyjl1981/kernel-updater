@@ -38,6 +38,7 @@ LOW_LATENCY=false
 FORCE=false
 FULL_DEBUG_INFO=false
 JOBS=""
+REQUESTED_VERSION=""
 LOCALVERSION=""
 LOCALVERSION_EXPLICIT=false
 
@@ -50,9 +51,11 @@ while [[ $# -gt 0 ]]; do
     --low-latency) LOW_LATENCY=true; shift ;;
     --hardware-optimised) HARDWARE_OPTIMISED=true; shift ;;
     --jobs) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || { echo "--jobs requires a positive integer" >&2; exit 1; }; JOBS="$2"; shift 2 ;;
+    --kernel-version) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)(\.[1-9][0-9]*)?$ ]] || { echo "--kernel-version requires an exact release such as 7.3 or 7.3.1" >&2; exit 1; }; REQUESTED_VERSION="$2"; shift 2 ;;
     --localversion) [[ $# -ge 2 && $2 =~ ^-[a-zA-Z0-9._+-]+$ ]] || { echo "--localversion requires a suffix such as -custom" >&2; exit 1; }; LOCALVERSION="$2"; LOCALVERSION_EXPLICIT=true; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--clang] [--lto] [--hardware-optimised | --low-latency] [--force] [--full-debug-info] [--jobs N] [--localversion -mytag]"
+      echo "Usage: $0 [--clang] [--lto] [--hardware-optimised | --low-latency] [--force] [--full-debug-info] [--jobs N] [--kernel-version VERSION] [--localversion -mytag]"
+      echo "  --kernel-version VERSION  build this exact release (e.g. 7.3); default: latest stable."
       echo "  --jobs N           override automatic CPU/RAM-based parallel job selection."
       echo "  --lto              requires --clang. Not recommended on low-RAM/low-core machines."
       echo "  --force            rebuild even if this is the same version you last built."
@@ -207,21 +210,25 @@ log "Configuring ccache"
 ccache --max-size=10G >/dev/null 2>&1 || true
 ccache -z >/dev/null 2>&1 || true
 
-### ---------- 5. Get the latest stable kernel version ------------------------
-log "Querying kernel.org for the latest stable release"
+### ---------- 5. Select the kernel.org version ------------------------
+log "Selecting kernel.org release"
 
 CURL_OPTS=(--fail --silent --show-error --location --connect-timeout 10 --max-time 30 --retry 2)
 
 # Python's JSON parser is also used by the GUI; never parse JSON with grep.
-JSON=$(curl "${CURL_OPTS[@]}" https://www.kernel.org/releases.json || true)
-KVER=$(printf '%s' "$JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_stable"]["version"])' 2>/dev/null || true)
-if [[ ! "$KVER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-  warn "Release lookup failed; trying stable Git tags"
-  KVER=$(timeout 45 git ls-remote --tags --refs https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git 2>/dev/null \
-    | awk -F'refs/tags/v' '{print $2}' | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V | tail -n1 || true)
+if [[ -n "$REQUESTED_VERSION" ]]; then
+  KVER="$REQUESTED_VERSION"
+else
+  JSON=$(curl "${CURL_OPTS[@]}" https://www.kernel.org/releases.json || true)
+  KVER=$(printf '%s' "$JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_stable"]["version"])' 2>/dev/null || true)
+  if [[ ! "$KVER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    warn "Release lookup failed; trying stable Git tags"
+    KVER=$(timeout 45 git ls-remote --tags --refs https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git 2>/dev/null \
+      | awk -F'refs/tags/v' '{print $2}' | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V | tail -n1 || true)
+  fi
+  [[ "$KVER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || err "Could not determine the stable release. Check your internet connection."
 fi
-[[ "$KVER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || err "Could not determine the stable release. Check your internet connection."
-log "Latest stable kernel: $KVER"
+log "Selected kernel.org release: $KVER"
 
 TOOLCHAIN=gcc
 $USE_CLANG && TOOLCHAIN=clang
@@ -251,12 +258,16 @@ if [[ ! -f "$TARBALL" ]]; then
   mv -- "$TARBALL.part" "$TARBALL"
 fi
 
-# Verify the uncompressed tar against kernel.org's release-signing key.  Since
-# Linux 4.18 kernel.org tarballs are signed by Greg Kroah-Hartman.  Both the WKD
-# address and full fingerprint are published at https://www.kernel.org/signature.html.
+# Verify against the pinned release signer: Linus for base releases, Greg
+# for stable updates. WKD addresses and full fingerprints are published at
+# https://www.kernel.org/signature.html.
 # Do not infer trust from a key ID in the downloaded signature.
 SIGNER=647F28654894E3BD457199BE38DBBDC86092693E
 SIGNER_WKD=gregkh@kernel.org
+if [[ "$KVER" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  SIGNER=ABAF11C65A2970B130ABE3C479BE3E4300411886
+  SIGNER_WKD=torvalds@kernel.org
+fi
 GPG_DIR="$SRC_DIR/.gnupg"
 mkdir -p "$GPG_DIR"
 chmod 700 "$GPG_DIR"

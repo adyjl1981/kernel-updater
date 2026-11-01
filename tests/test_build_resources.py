@@ -77,7 +77,7 @@ class AutomaticGuiTests(unittest.TestCase):
     def setUp(self):
         self.app = existing.gui.KernelManagerApp.__new__(existing.gui.KernelManagerApp)
         for name, value in [('auto_jobs_var', True), ('jobs_var', '0'), ('toolchain_var', 'clang'),
-                            ('lto_var', True), ('debug_var', True), ('force_var', False), ('build_mode_var', 'standard')]:
+                            ('lto_var', True), ('debug_var', True), ('force_var', False), ('kernel_version_var', 'Latest stable'), ('build_mode_var', 'standard')]:
             var = mock.Mock(); var.get.return_value = value; setattr(self.app, name, var)
         self.app._dependencies_available = mock.Mock(return_value=True)
         self.app._start_stream = mock.Mock()

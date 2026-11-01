@@ -270,3 +270,21 @@ that dependency only when baseline callback offload is enabled. No enabled
 baseline features were lost. Other kernel versions and architectures have not
 been validated with native Kconfig in this change. No kernel build or boot test
 was performed.
+
+### Choose a kernel.org release
+
+The Build tab's **Kernel.org version** field defaults to **Latest stable**.
+Click **Refresh releases** to load kernel.org's published final releases, or type
+an exact version such as `7.3`. Your choice is saved with the other build options.
+Selecting `7.3` builds that exact base release, never `7.3.1` or another update.
+The version selector works with Standard, Hardware Optimised and Low Latency.
+Older releases omit fixes from later updates; selection does not guarantee that
+an older kernel supports your hardware or current toolchain.
+
+For command-line builds, use `./build-custom-kernel.sh --kernel-version 7.3`
+(optionally with `--low-latency`). Omit `--kernel-version` for latest stable.
+Only final numeric releases are accepted; release candidates and custom URLs are
+not supported. A missing archive or failed signature stops the build rather than
+substituting another version. Existing source trees remain preserved.
+Base releases use Linus Torvalds's pinned signing fingerprint; stable updates
+retain Greg Kroah-Hartman's pinned key and the existing verification workflow.

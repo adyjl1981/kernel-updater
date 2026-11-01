@@ -450,6 +450,15 @@ def list_installed_kernels():
     return kernels
 
 
+def kernel_release_choices():
+    """Published final releases; older exact versions can also be entered."""
+    with urllib.request.urlopen("https://www.kernel.org/releases.json", timeout=15) as response:
+        data = json.load(response)
+    versions = {item.get("version", "") for item in data["releases"]}
+    return sorted((v for v in versions if re.fullmatch(r"[1-9][0-9]*\.(?:0|[1-9][0-9]*)(?:\.[1-9][0-9]*)?", v)),
+                  key=lambda v: tuple(map(int, v.split("."))), reverse=True)
+
+
 def latest_stable_version() -> str | None:
     """Use kernel.org's structured release field, with a bounded Git fallback."""
     try:
@@ -1591,6 +1600,16 @@ class KernelManagerApp:
     def _build_build_tab(self):
         frame = self.build_tab
 
+        release = ttk.LabelFrame(frame, text="Kernel.org version")
+        release.pack(fill="x", padx=4, pady=4)
+        self.kernel_version_var = tk.StringVar(value=self.presets.get("kernel_version", "Latest stable"))
+        self.kernel_version_combo = ttk.Combobox(release, textvariable=self.kernel_version_var,
+                                                values=("Latest stable",), width=24)
+        self.kernel_version_combo.grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        ttk.Button(release, text="Refresh releases", command=self.refresh_kernel_releases).grid(row=0, column=1, padx=6)
+        ttk.Label(release, text="Choose a published release or type an exact version, e.g. 7.3.\n7.3 builds 7.3 exactly; it does not select 7.3.1. Older releases omit later fixes.",
+                  wraplength=680).grid(row=1, column=0, columnspan=2, padx=6, pady=4, sticky="w")
+
         mode = ttk.LabelFrame(frame, text="Build configuration")
         mode.pack(fill="x", padx=4, pady=4)
         self.build_mode_var = tk.StringVar(value=(self.presets.get("build_mode") if self.presets.get("build_mode") in ("hardware", "lowlatency") else "standard"))
@@ -1783,21 +1802,33 @@ class KernelManagerApp:
             "debug": self.debug_var.get(),
             "jobs": self.jobs_var.get(), "auto_jobs": self.auto_jobs_var.get(),
             "build_mode": self.build_mode_var.get(),
+            "kernel_version": self.kernel_version_var.get(),
         }
         save_presets(self.presets)
         self.closed = True
         self.root.destroy()
 
+    def refresh_kernel_releases(self):
+        def done(versions):
+            self.kernel_version_combo.configure(values=("Latest stable", *versions))
+        self._read_async("Kernel.org releases", kernel_release_choices, done)
+
     def _sync_jobs_state(self):
         self.jobs_spinbox.configure(state="disabled" if self.auto_jobs_var.get() else "normal")
 
     def start_build(self):
+        version = self.kernel_version_var.get().strip()
+        if version != "Latest stable" and not re.fullmatch(r"[1-9][0-9]*\.(?:0|[1-9][0-9]*)(?:\.[1-9][0-9]*)?", version):
+            messagebox.showerror("Build", "Choose Latest stable or enter an exact release such as 7.3 or 7.3.1.")
+            return
         needed = {"runtime", "build_toolchain", "build_headers", "build_utilities"}
         if self.toolchain_var.get() == "clang":
             needed.add("clang")
         if not self._dependencies_available(needed):
             return
         cmd = ["bash", str(BUILD_SCRIPT)]
+        if version != "Latest stable":
+            cmd.extend(["--kernel-version", version])
         self._jobs_estimate = None
         if self.auto_jobs_var.get():
             jobs, reason = build_resources.recommend_jobs(
@@ -1842,7 +1873,7 @@ class KernelManagerApp:
                 self._append_log(self._jobs_estimate)
             save_presets({"toolchain": self.toolchain_var.get(), "lto": self.lto_var.get(),
                           "debug": self.debug_var.get(), "jobs": self.jobs_var.get(), "auto_jobs": self.auto_jobs_var.get(),
-                          "build_mode": self.build_mode_var.get()})
+                          "build_mode": self.build_mode_var.get(), "kernel_version": self.kernel_version_var.get()})
         self._append_log(f"$ {shlex.join(cmd)} (in {cwd})\n")
         fd = self.operation_lock.fileno()
         env["KERNEL_MANAGER_LOCK_FD"] = str(fd)
